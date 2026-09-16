@@ -284,6 +284,20 @@ Public Function PRIME_SearchColumns() As Variant
 End Function
 
 ' Лист "Инвентаризация".
+' Лист "Комплекты" - плоская таблица (одна строка на компонент), как в ТЗ kits.fields.
+' Первый релиз: только режим "набор для выдачи" (issue_bundle), без виртуального остатка комплекта.
+Public Function PRIME_KitsColumns() As Variant
+    Dim cols(6) As String
+    cols(0) = "KIT_ID"
+    cols(1) = "Название"
+    cols(2) = "Версия"
+    cols(3) = "PRODUCT_CODE"
+    cols(4) = "Количество на 1 комплект"
+    cols(5) = "Единица"
+    cols(6) = "Активен"
+    PRIME_KitsColumns = cols
+End Function
+
 Public Function PRIME_InventoryColumns() As Variant
     Dim cols(9) As String
     cols(0) = "Сессия"
