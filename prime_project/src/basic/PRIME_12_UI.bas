@@ -51,9 +51,14 @@ Public Sub PRIME_Nav_Search()
 End Sub
 
 Public Sub PRIME_UI_RestoreInterfaceButton()
+    PRIME_UI_RestoreInterfaceSilent()
+    MsgBox "Интерфейс PRIME восстановлен."
+End Sub
+
+' Без MsgBox - для сборщика (tools/build_ods.py) и вызова из PRIME_Build_RunFullSetup.
+Public Sub PRIME_UI_RestoreInterfaceSilent()
     PRIME_UI_ApplySheetVisibility()
     PRIME_UI_ApplyFreezeAndFilters()
-    MsgBox "Интерфейс PRIME восстановлен."
 End Sub
 
 Private Sub PRIME_UI_ApplySheetVisibility()

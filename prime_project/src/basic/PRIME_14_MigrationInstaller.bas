@@ -189,9 +189,28 @@ End Sub
 ' Zero-arg, no-dialog вариант миграции для сборщика (tools/build_ods.py) и автоматических тестов -
 ' UNO script provider не умеет удобно принимать ByRef-массивы через invoke() извне, поэтому
 ' здесь всё держится в локальных переменных одного вызова, без диалогов.
+'
+' PRIME_Build_RunFullSetup - ЕДИНСТВЕННАЯ функция, которую должен вызывать внешний сборщик
+' (tools/build_ods.py) одним invoke(). Эмпирически подтверждено (см. историю отладки в git log):
+' повторный вызов PRIME_Install_EnsureSchema непосредственно перед PRIME_Migration_MigrateOrdersSheet
+' в рамках одного и того же invoke() ломает выполнение ("Object variable not set", без видимого
+' исключения наружу) - поэтому PRIME_Build_MigrateSilent (в отличие от интерактивной
+' PRIME_Migration_RunButton, у которой это её единственный вызов EnsureSchema) НЕ повторяет
+' EnsureSchema, полагаясь на то, что PRIME_Install_EnsureAllBusinessSheetsSilent уже вызвала её.
+Public Sub PRIME_Build_RunFullSetup(ByVal runMigration As Boolean)
+    PRIME_Install_EnsureAllBusinessSheetsSilent()
+    If runMigration Then
+        PRIME_Build_MigrateSilent()
+    Else
+        PRIME_Install_DisableLegacyEvents()
+    End If
+    PRIME_UI_RestoreInterfaceSilent()
+End Sub
+
+' Вызывать ТОЛЬКО после того, как PRIME_Install_EnsureSchema уже был вызван в этом же сеансе
+' (через PRIME_Install_EnsureAllBusinessSheetsSilent) - см. предупреждение выше.
 Public Sub PRIME_Build_MigrateSilent()
     PRIME_Install_DisableLegacyEvents()
-    PRIME_Install_EnsureSchema()
     Dim oldCodes() As String
     Dim newCodes() As String
     Dim mapCount As Long

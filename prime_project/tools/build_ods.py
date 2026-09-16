@@ -306,24 +306,30 @@ def build(template: Path, output: Path, port: int, profile_dir: Path, run_migrat
         print("Injecting PRIME Basic modules ...")
         inject_basic_modules(doc)
 
+        # ВАЖНО: EnsureSchema и Migrate должны идти в ОТДЕЛЬНЫХ top-level invoke()-вызовах от
+        # внешнего скрипта, а не в одной цепочке вызовов внутри одного invoke(). Эмпирически
+        # подтверждено (см. историю отладки в git log): "EnsureSchema, затем сразу
+        # MigrateOrdersSheet в рамках ОДНОГО invoke()" молча ничего не мигрирует (без видимого
+        # исключения), а те же две операции, разнесённые по двум отдельным invoke(), работают
+        # штатно. Поэтому здесь два отдельных вызова, не один PRIME_Build_RunFullSetup.
         print("Running PRIME_Install_EnsureAllBusinessSheetsSilent ...")
         invoke_macro(doc, "Standard.PRIME_14_MigrationInstaller.PRIME_Install_EnsureAllBusinessSheetsSilent")
 
         if run_migration:
-            print("Running PRIME_Build_MigrateSilent (Orders column migration + product seeding) ...")
+            print("Running PRIME_Build_MigrateSilent (separate invoke) ...")
             invoke_macro(doc, "Standard.PRIME_14_MigrationInstaller.PRIME_Build_MigrateSilent")
         else:
-            print("Running PRIME_Install_DisableLegacyEvents ...")
+            print("Running PRIME_Install_DisableLegacyEvents (separate invoke) ...")
             invoke_macro(doc, "Standard.PRIME_14_MigrationInstaller.PRIME_Install_DisableLegacyEvents")
+
+        print("Applying PRIME UI layout (separate invoke) ...")
+        invoke_macro(doc, "Standard.PRIME_12_UI.PRIME_UI_RestoreInterfaceSilent")
 
         print("Binding PRIME_OnContentChanged_* sheet events (OnChange) ...")
         bind_sheet_events(doc)
 
         print("Rebinding buttons to PRIME macros ...")
         rebind_buttons(doc)
-
-        print("Applying PRIME UI layout (PRIME_UI_RestoreInterfaceButton) ...")
-        invoke_macro(doc, "Standard.PRIME_12_UI.PRIME_UI_RestoreInterfaceButton")
 
         print("Saving ...")
         doc.store()
