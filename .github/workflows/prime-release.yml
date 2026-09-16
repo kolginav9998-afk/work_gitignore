@@ -15,13 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
       - name: Install LibreOffice Calc + Xvfb
         run: |
           sudo apt-get update
           sudo apt-get install -y libreoffice-calc xvfb python3-uno
+      # No actions/setup-python: it would put its own interpreter ahead of the system
+      # python3 in PATH, and python3-uno (installed above) only registers against the
+      # system python3 - `import uno` fails under a setup-python-managed interpreter.
 
       - name: prime-static
         run: python3 tools/static_check_source.py
