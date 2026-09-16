@@ -176,7 +176,12 @@ Private Function PRIME_ValidateAndExpandPlan(ByRef plan As PrimeDocPlan, ByRef e
             Exit Function
         End If
 
-        If plan.Lines(i).QtyInput <= 0 Then
+        ' ADJUSTMENT допускает отрицательный ввод (недостача) - разница инвентаризации.
+        If plan.Lines(i).QtyInput = 0 Then
+            errMsg = "Строка " & (i + 1) & ": количество (разница) не может быть нулевым."
+            PRIME_ValidateAndExpandPlan = False
+            Exit Function
+        ElseIf plan.Lines(i).QtyInput < 0 And plan.DocType <> DOC_ADJUSTMENT Then
             errMsg = "Строка " & (i + 1) & ": количество должно быть больше нуля."
             PRIME_ValidateAndExpandPlan = False
             Exit Function
@@ -193,11 +198,29 @@ Private Function PRIME_ValidateAndExpandPlan(ByRef plan As PrimeDocPlan, ByRef e
         Case DOC_TRANSFER
             PRIME_ValidateAndExpandPlan = PRIME_ValidateTransfer(plan, errMsg)
         Case DOC_ADJUSTMENT
-            PRIME_ValidateAndExpandPlan = True ' инвентаризация уже даёт готовую разницу построчно
+            PRIME_ValidateAndExpandPlan = PRIME_ValidateAdjustment(plan, errMsg)
         Case Else
             errMsg = "Неизвестный тип документа: " & plan.DocType
             PRIME_ValidateAndExpandPlan = False
     End Select
+End Function
+
+' Разница инвентаризации: знак сохраняется через конвертацию (недостача - отрицательная QtyBase).
+Private Function PRIME_ValidateAdjustment(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
+    Dim i As Long
+    For i = 0 To plan.LineCount - 1
+        Dim sign As Double
+        sign = Sgn(plan.Lines(i).QtyInput)
+        Dim baseQty As Variant
+        baseQty = PRIME_ConvertQtyToBase(plan.Lines(i).ProductCode, plan.Lines(i).UnitInput, Abs(plan.Lines(i).QtyInput))
+        If IsEmpty(baseQty) Then
+            errMsg = "Строка " & (i + 1) & ": нет коэффициента пересчёта для единицы """ & plan.Lines(i).UnitInput & """."
+            PRIME_ValidateAdjustment = False
+            Exit Function
+        End If
+        plan.Lines(i).QtyBase = CDbl(baseQty) * sign
+    Next i
+    PRIME_ValidateAdjustment = True
 End Function
 
 Private Function PRIME_ValidateReceipt(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean

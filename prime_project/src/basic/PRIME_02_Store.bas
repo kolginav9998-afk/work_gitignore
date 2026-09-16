@@ -266,6 +266,59 @@ Public Function PRIME_SequenceNext(ByVal seqName As String) As Long
     PRIME_SequenceNext = nextVal
 End Function
 
+' --- SYS_PRIME_META: простой key/value (версии, текущая сессия инвентаризации и т.п.) ---
+Public Function PRIME_MetaGet(ByVal key As String) As String
+    If Not PRIME_SheetExists(SH_SYS_META) Then
+        PRIME_MetaGet = ""
+        Exit Function
+    End If
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SYS_META)
+    Dim colKey As Long, colValue As Long
+    colKey = PRIME_ColIndex(headers, "KEY")
+    colValue = PRIME_ColIndex(headers, "VALUE")
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_SYS_META)
+    Dim idx As Long
+    idx = PRIME_FindRowByKey(table, colKey, key)
+    If idx = -1 Then
+        PRIME_MetaGet = ""
+    Else
+        PRIME_MetaGet = CStr(table(idx)(colValue))
+    End If
+End Function
+
+Public Sub PRIME_MetaSet(ByVal key As String, ByVal value As String)
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SYS_META)
+    Dim colKey As Long, colValue As Long
+    colKey = PRIME_ColIndex(headers, "KEY")
+    colValue = PRIME_ColIndex(headers, "VALUE")
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_SYS_META)
+    Dim idx As Long
+    idx = PRIME_FindRowByKey(table, colKey, key)
+
+    If idx = -1 Then
+        Dim newRow(UBound(table(0))) As Variant
+        newRow(colKey) = key
+        newRow(colValue) = value
+        Dim rows(0) As Variant
+        rows(0) = newRow
+        PRIME_AppendRowsBatch(SH_SYS_META, rows)
+    Else
+        Dim updRow(UBound(table(idx))) As Variant
+        Dim c As Long
+        For c = 0 To UBound(table(idx))
+            updRow(c) = table(idx)(c)
+        Next c
+        updRow(colValue) = value
+        Dim updRows(0) As Variant
+        updRows(0) = updRow
+        PRIME_UpdateRowsBatch(SH_SYS_META, idx, updRows)
+    End If
+End Sub
+
 ' --- Вспомогательные обёртки над Collection (в StarBasic нет .Contains/.TryGetValue) ---
 Public Function PRIME_CollectionHasKey(ByVal coll As Object, ByVal key As String) As Boolean
     Dim dummy As Variant

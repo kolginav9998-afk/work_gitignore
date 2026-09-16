@@ -219,3 +219,44 @@ Public Function PRIME_WorkflowHiddenColumns() As Variant
     cols(0) = "_PRIME_WFState"
     PRIME_WorkflowHiddenColumns = cols
 End Function
+
+' Лист "Возвраты" - единственный механизм возврата (single_return_mechanism).
+' "Вернуть сейчас" - редактируемое пользователем поле (не техническое), стоит последним
+' перед скрытыми helper-колонками.
+Public Function PRIME_ReturnsColumns() As Variant
+    Dim cols(9) As String
+    cols(0) = "Дата выдачи"
+    cols(1) = "Код"
+    cols(2) = "Наименование"
+    cols(3) = "Выдано"
+    cols(4) = "Уже возвращено"
+    cols(5) = "Осталось к возврату"
+    cols(6) = "Ед. изм."
+    cols(7) = "Кому"
+    cols(8) = "Вернуть сейчас"
+    cols(9) = "Комментарий"
+    PRIME_ReturnsColumns = cols
+End Function
+
+Public Function PRIME_ReturnsHiddenColumns() As Variant
+    Dim cols(1) As String
+    cols(0) = "_PRIME_OriginalLineId"
+    cols(1) = "_PRIME_ReturnState"
+    PRIME_ReturnsHiddenColumns = cols
+End Function
+
+' Лист "Инвентаризация".
+Public Function PRIME_InventoryColumns() As Variant
+    Dim cols(9) As String
+    cols(0) = "Сессия"
+    cols(1) = "Код"
+    cols(2) = "Наименование"
+    cols(3) = "Место"
+    cols(4) = "Категория"
+    cols(5) = "Подкатегория"
+    cols(6) = "Учёт"
+    cols(7) = "Факт"
+    cols(8) = "Разница"
+    cols(9) = "Ед. изм."
+    PRIME_InventoryColumns = cols
+End Function
