@@ -245,6 +245,44 @@ Public Function PRIME_ReturnsHiddenColumns() As Variant
     PRIME_ReturnsHiddenColumns = cols
 End Function
 
+' Лист "Остаток" - view поверх COMMITTED-движений, batch_output, без скрытого 2000-лимита.
+Public Function PRIME_StockColumns() As Variant
+    Dim cols(5) As String
+    cols(0) = "Код"
+    cols(1) = "Наименование"
+    cols(2) = "Ед. изм."
+    cols(3) = "Место хранения"
+    cols(4) = "Остаток"
+    cols(5) = "Последняя операция"
+    PRIME_StockColumns = cols
+End Function
+
+' Лист "Остаток — Заказы" - снимки заказа + остаток соответствующей партии (include_zero_lot_balance).
+Public Function PRIME_StockOrdersColumns() As Variant
+    Dim cols(6) As String
+    cols(0) = "ORDER_ID"
+    cols(1) = "Дата"
+    cols(2) = "Код товара"
+    cols(3) = "Наименование"
+    cols(4) = "Количество поставки"
+    cols(5) = "LOT_ID"
+    cols(6) = "Текущий остаток партии"
+    PRIME_StockOrdersColumns = cols
+End Function
+
+' Лист "База - Поиск" - batch_search по документам/строкам/партиям.
+Public Function PRIME_SearchColumns() As Variant
+    Dim cols(6) As String
+    cols(0) = "Тип"
+    cols(1) = "Дата"
+    cols(2) = "DOC_ID"
+    cols(3) = "Код"
+    cols(4) = "Наименование"
+    cols(5) = "Количество"
+    cols(6) = "Подробности"
+    PRIME_SearchColumns = cols
+End Function
+
 ' Лист "Инвентаризация".
 Public Function PRIME_InventoryColumns() As Variant
     Dim cols(9) As String
