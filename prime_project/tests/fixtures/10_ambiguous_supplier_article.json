@@ -1,0 +1,24 @@
+{
+  "scenario": "ambiguous_supplier_article",
+  "description": "Один и тот же артикул поставщика соответствует двум РАЗНЫМ внутренним товарам в зависимости от площадки/продавца - система не должна угадывать, а должна требовать явного выбора пользователя (DB_PRIME_ALIASES, PRIME_ALIAS_AMBIGUOUS).",
+  "aliases": [
+    {"ALIAS_ID": "ALS-0001", "PRODUCT_CODE": "ЕИ-00000060", "PLATFORM": "Тестовая площадка 1", "SELLER": "Тестовый продавец 1", "SUPPLIER_ARTICLE": "ART-SHARED-001", "ACTIVE": 1},
+    {"ALIAS_ID": "ALS-0002", "PRODUCT_CODE": "ЕИ-00000061", "PLATFORM": "Тестовая площадка 2", "SELLER": "Тестовый продавец 2", "SUPPLIER_ARTICLE": "ART-SHARED-001", "ACTIVE": 1}
+  ],
+  "products": [
+    {"PRODUCT_CODE": "ЕИ-00000060", "PRODUCT_NAME": "Тестовый товар X", "BASE_UNIT": "шт", "ACTIVE": 1},
+    {"PRODUCT_CODE": "ЕИ-00000061", "PRODUCT_NAME": "Тестовый товар Y", "BASE_UNIT": "шт", "ACTIVE": 1}
+  ],
+  "lookup_cases": [
+    {
+      "description": "Полный контекст (площадка + продавец + артикул) совпадает ровно с одним алиасом - однозначно.",
+      "input": {"PLATFORM": "Тестовая площадка 1", "SELLER": "Тестовый продавец 1", "SUPPLIER_ARTICLE": "ART-SHARED-001"},
+      "expected": {"resolved": true, "PRODUCT_CODE": "ЕИ-00000060"}
+    },
+    {
+      "description": "Только артикул без площадки/продавца - совпадает с двумя разными товарами - неоднозначно, требуется выбор пользователя.",
+      "input": {"PLATFORM": "", "SELLER": "", "SUPPLIER_ARTICLE": "ART-SHARED-001"},
+      "expected": {"resolved": false, "reason": "PRIME_ALIAS_AMBIGUOUS", "candidates": ["ЕИ-00000060", "ЕИ-00000061"]}
+    }
+  ]
+}

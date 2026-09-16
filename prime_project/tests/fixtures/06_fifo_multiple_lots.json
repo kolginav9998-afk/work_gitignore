@@ -1,0 +1,25 @@
+{
+  "scenario": "fifo_multiple_lots",
+  "description": "Выдача 15 единиц товара, у которого 2 партии (10 и 20 единиц соответственно) - должна списать полностью первую партию (по дате прихода) и частично вторую.",
+  "products": [
+    {"PRODUCT_CODE": "ЕИ-00000020", "PRODUCT_NAME": "Тестовый товар — FIFO", "BASE_UNIT": "шт", "ACTIVE": 1}
+  ],
+  "lots": [
+    {"LOT_ID": "LOT-0020-1", "PRODUCT_CODE": "ЕИ-00000020", "RECEIPT_DATE": "2026-01-01", "ORIGINAL_QTY_BASE": 10},
+    {"LOT_ID": "LOT-0020-2", "PRODUCT_CODE": "ЕИ-00000020", "RECEIPT_DATE": "2026-01-02", "ORIGINAL_QTY_BASE": 20}
+  ],
+  "issue": {"SOURCE_KEY": "FIXTURE-ISSUE-FIFO-1", "QTY": 15},
+  "expected": {
+    "allocations": [
+      {"LOT_ID": "LOT-0020-1", "QTY_BASE": 10},
+      {"LOT_ID": "LOT-0020-2", "QTY_BASE": 5}
+    ],
+    "remaining_balance_lot_1": 0,
+    "remaining_balance_lot_2": 15
+  },
+  "shortage_variant": {
+    "description": "Тот же товар, попытка выдать 35 единиц при суммарном остатке 30 - должна быть отклонена целиком, без частичной выдачи.",
+    "issue": {"SOURCE_KEY": "FIXTURE-ISSUE-FIFO-SHORTAGE", "QTY": 35},
+    "expected": {"rejected": true, "reason": "insufficient_stock", "movements_created": 0}
+  }
+}

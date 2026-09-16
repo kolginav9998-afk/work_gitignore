@@ -1,0 +1,8 @@
+{
+  "scenario": "movement_history_1000",
+  "description": "1000 синтетических COMMITTED-движений - генерируется по требованию, не хранится статически.",
+  "generator": "generate_large_history.py",
+  "generator_args": [1000],
+  "seed": 42,
+  "purpose": "Проверка производительности PRIME_ReadTable/PRIME_TotalLotBalance на среднем объёме истории."
+}

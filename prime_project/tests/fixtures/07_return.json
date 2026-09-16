@@ -1,0 +1,18 @@
+{
+  "scenario": "return",
+  "description": "Выдано 5 единиц синтетического товара; возврат 2 единиц, затем попытка вернуть больше оставшегося лимита (3.1 при лимите 3).",
+  "products": [
+    {"PRODUCT_CODE": "ЕИ-00000030", "PRODUCT_NAME": "Тестовый товар — возврат", "BASE_UNIT": "шт", "ACTIVE": 1}
+  ],
+  "original_issue": {"DOC_LINE_ID": "DOC-0030-L1", "ISSUED_QTY": 5},
+  "returns": [
+    {"SOURCE_KEY": "FIXTURE-RETURN-1", "QTY": 2, "expected_result": "accepted"},
+    {"SOURCE_KEY": "FIXTURE-RETURN-1", "QTY": 2, "expected_result": "idempotent_repeat_no_double_credit"},
+    {"SOURCE_KEY": "FIXTURE-RETURN-2", "QTY": 3, "expected_result": "accepted_exactly_at_limit"},
+    {"SOURCE_KEY": "FIXTURE-RETURN-3", "QTY": 0.1, "expected_result": "rejected_exceeds_remaining"}
+  ],
+  "expected": {
+    "remaining_returnable_after_first_two_returns": 0,
+    "total_returned_qty_base": 5
+  }
+}

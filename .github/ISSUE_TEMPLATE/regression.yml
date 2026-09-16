@@ -1,0 +1,96 @@
+name: "⛔ Регрессия (ранее работало, сейчас сломано)"
+description: "Сообщить, что поведение, которое раньше работало корректно, перестало работать"
+labels: ["bug", "regression"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Для регрессии особенно важно указать версию/commit, где поведение ЕЩЁ было корректным,
+        и версию/commit, где оно уже сломано — это сильно ускоряет bisect.
+        НЕ прикладывайте реальные складские данные — только синтетический пример при
+        необходимости (см. `tests/fixtures/`).
+
+  - type: input
+    id: last_good_version
+    attributes:
+      label: Последняя версия/commit, где поведение было корректным
+    validations:
+      required: false
+
+  - type: input
+    id: first_bad_version
+    attributes:
+      label: Версия/commit, где обнаружена регрессия
+    validations:
+      required: true
+
+  - type: input
+    id: lo_version
+    attributes:
+      label: Версия LibreOffice
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Операционная система
+    validations:
+      required: true
+
+  - type: textarea
+    id: operation
+    attributes:
+      label: Какая операция выполнялась
+    validations:
+      required: true
+
+  - type: input
+    id: op_id
+    attributes:
+      label: OP_ID (если есть)
+    validations:
+      required: false
+
+  - type: input
+    id: last_stage
+    attributes:
+      label: Последний успешный этап (STAGE из DB_PRIME_AUDIT, если доступен)
+    validations:
+      required: false
+
+  - type: textarea
+    id: error_text
+    attributes:
+      label: Текст ошибки (если есть)
+    validations:
+      required: false
+
+  - type: textarea
+    id: previous_behavior
+    attributes:
+      label: Как это работало раньше
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Как это работает сейчас
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        Каждая подтверждённая регрессия должна получить регрессионный тест вместе с
+        исправлением (в `tests/model_tests.py` и/или `tests/static_checks.py`) — см. правило
+        `regression policy` в CONTRIBUTING/README проекта. Не прикладывайте реальные
+        накладные/УПД/полную базу склада по умолчанию.

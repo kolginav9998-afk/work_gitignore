@@ -1,0 +1,18 @@
+{
+  "scenario": "partial_receipt",
+  "description": "Заказ на 10 единиц синтетического товара, поступивший двумя частями (6 + 4), разными SOURCE_KEY (разные поставки одного заказа).",
+  "products": [
+    {"PRODUCT_CODE": "ЕИ-00000010", "PRODUCT_NAME": "Тестовый товар — частичная поставка", "BASE_UNIT": "шт", "ACTIVE": 1}
+  ],
+  "order": {"ORDER_ID": "ORD-00000010", "ORDERED_QTY": 10},
+  "deliveries": [
+    {"SOURCE_KEY": "ORD-00000010|OL-1|DLV-1", "QTY": 6, "EXPECTED_LOT": "LOT-1"},
+    {"SOURCE_KEY": "ORD-00000010|OL-1|DLV-2", "QTY": 4, "EXPECTED_LOT": "LOT-2"}
+  ],
+  "expected": {
+    "received_total": 10,
+    "remaining_to_receive": 0,
+    "distinct_lots": 2,
+    "double_post_same_source_key_creates_no_new_lot": true
+  }
+}

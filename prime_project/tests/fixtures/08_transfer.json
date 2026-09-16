@@ -1,0 +1,19 @@
+{
+  "scenario": "transfer",
+  "description": "Перемещение 15 единиц синтетического товара с Sklad-A (остаток 50) на Sklad-B (остаток 20) - суммарный остаток товара не должен измениться.",
+  "products": [
+    {"PRODUCT_CODE": "ЕИ-00000040", "PRODUCT_NAME": "Тестовый товар — перемещение", "BASE_UNIT": "шт", "ACTIVE": 1}
+  ],
+  "initial_stock": {"Sklad-A": 50, "Sklad-B": 20},
+  "transfer": {"SOURCE_KEY": "FIXTURE-TRANSFER-1", "QTY": 15, "FROM": "Sklad-A", "TO": "Sklad-B"},
+  "expected": {
+    "final_stock": {"Sklad-A": 35, "Sklad-B": 35},
+    "total_before": 70,
+    "total_after": 70
+  },
+  "shortage_variant": {
+    "description": "Попытка переместить 60 единиц с Sklad-A, где остаток только 50 - должна быть отклонена.",
+    "transfer": {"SOURCE_KEY": "FIXTURE-TRANSFER-SHORTAGE", "QTY": 60, "FROM": "Sklad-A", "TO": "Sklad-B"},
+    "expected": {"rejected": true, "reason": "insufficient_stock_at_location"}
+  }
+}
