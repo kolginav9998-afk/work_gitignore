@@ -151,6 +151,14 @@ Public Function PRIME_OrdersHiddenColumns() As Variant
     PRIME_OrdersHiddenColumns = cols
 End Function
 
+' Единственная скрытая helper-колонка листа "Выдачи": стабильный ISSUE_DRAFT_ID (idempotency),
+' присваивается один раз при создании строки, не меняется при повторных кликах "Провести".
+Public Function PRIME_IssuesHiddenColumns() As Variant
+    Dim cols(0) As String
+    cols(0) = "_PRIME_IssueState"
+    PRIME_IssuesHiddenColumns = cols
+End Function
+
 Public Function PRIME_IssuesColumns() As Variant
     Dim cols(12) As String
     cols(0)  = "№"
@@ -167,4 +175,47 @@ Public Function PRIME_IssuesColumns() As Variant
     cols(11) = "Назначение / проект"
     cols(12) = "Примечание"
     PRIME_IssuesColumns = cols
+End Function
+
+' Приход — Цех / Приход — Офис (единый workflow вместо разных "бухгалтерий" 1.4.1).
+' "Внутренний код" - обязательное поле, по нему живой lookup (live_code_lookup."Приход — Цех"/"Офис").
+Public Function PRIME_WorkflowReceiptColumns() As Variant
+    Dim cols(11) As String
+    cols(0)  = "Дата"
+    cols(1)  = "Внутренний код"
+    cols(2)  = "Наименование"
+    cols(3)  = "Артикул"
+    cols(4)  = "Кол-во"
+    cols(5)  = "Ед. изм."
+    cols(6)  = "Кто сдал"
+    cols(7)  = "Место хранения"
+    cols(8)  = "Категория"
+    cols(9)  = "Подкатегория"
+    cols(10) = "Документ"
+    cols(11) = "Комментарий"
+    PRIME_WorkflowReceiptColumns = cols
+End Function
+
+Public Function PRIME_WorkflowIssueColumns() As Variant
+    Dim cols(11) As String
+    cols(0)  = "Дата"
+    cols(1)  = "Внутренний код"
+    cols(2)  = "Наименование"
+    cols(3)  = "Артикул"
+    cols(4)  = "Кол-во"
+    cols(5)  = "Ед. изм."
+    cols(6)  = "Кому"
+    cols(7)  = "Место хранения"
+    cols(8)  = "Возвратный"
+    cols(9)  = "Назначение / проект"
+    cols(10) = "Документ"
+    cols(11) = "Комментарий"
+    PRIME_WorkflowIssueColumns = cols
+End Function
+
+' Единая скрытая helper-колонка для всех 4 workflow-листов (стабильный SOURCE_KEY, по аналогии с Issues).
+Public Function PRIME_WorkflowHiddenColumns() As Variant
+    Dim cols(0) As String
+    cols(0) = "_PRIME_WFState"
+    PRIME_WorkflowHiddenColumns = cols
 End Function
