@@ -5,6 +5,51 @@ Option Explicit
 ' с разными списками листов). Команда "Восстановить интерфейс PRIME" НЕ вызывается во время
 ' обычного проведения (rebuild_interface_during_normal_posting=false) - только вручную.
 
+' Заглушка для кнопок 1.4.1, чья функциональность сознательно не перенесена в первый релиз
+' PRIME 2.0.0 (см. known_limitations в финальном отчёте) - вместо тихого отказа или ошибки
+' обращения к несуществующей Firebird-базе, пользователь получает понятное объяснение.
+Public Sub PRIME_UI_NotImplementedStub()
+    MsgBox "Эта функция версии 1.4.1 не перенесена в первый стабильный релиз PRIME 2.0.0." & Chr(10) & _
+        "См. CHANGELOG_PRIME.md / TEST_REPORT.md, раздел ""Известные ограничения""."
+End Sub
+
+' Старая кнопка возврата на листе "Выдачи" удалена как отдельный механизм (конфликт двух
+' реализаций возврата в 1.4.1, см. ARCHITECTURE §0) - редирект вместо тихого/ошибочного действия.
+Public Sub PRIME_Issues_ReturnRedirectStub()
+    MsgBox "Возврат теперь оформляется только на листе ""Возвраты"" (кнопки ""Обновить"" и ""Провести возвраты"")."
+End Sub
+
+' Легаси-архивные листы (Производство/Детали) - только история, кнопки неактивны.
+Public Sub PRIME_Legacy_ArchiveStub()
+    MsgBox "Этот лист - архив истории версии 1.4.1, доступен только для чтения." & Chr(10) & _
+        "Текущий ввод ведите на листах ""Приход/Расход - Цех"" или ""Приход/Расход - Офис""."
+End Sub
+
+' --- Навигация (кнопки-ярлыки на Инфо/Дашборде/Отчёте, просто переключают активный лист) -----
+Public Sub PRIME_Nav_Dashboard()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_DASHBOARD))
+End Sub
+
+Public Sub PRIME_Nav_Report()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_REPORT_FINAL))
+End Sub
+
+Public Sub PRIME_Nav_ReportInput()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_REPORT_INPUT))
+End Sub
+
+Public Sub PRIME_Nav_Stock()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_STOCK))
+End Sub
+
+Public Sub PRIME_Nav_Orders()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_ORDERS))
+End Sub
+
+Public Sub PRIME_Nav_Search()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_SEARCH))
+End Sub
+
 Public Sub PRIME_UI_RestoreInterfaceButton()
     PRIME_UI_ApplySheetVisibility()
     PRIME_UI_ApplyFreezeAndFilters()

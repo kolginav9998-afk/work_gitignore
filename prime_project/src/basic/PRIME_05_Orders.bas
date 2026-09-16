@@ -281,6 +281,48 @@ Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     MsgBox "Проведено: " & docId
 End Sub
 
+' "Распознать по артикулам": для строк без "Код товара", но с заполненным "Код поставщика"/
+' "Артикул поставщика", подставляет код через product_aliases (ambiguous_match_behavior:
+' не угадывать при нескольких совпадениях - оставляет строку как есть).
+Public Sub PRIME_Orders_ResolveByArticleButton()
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(SH_ORDERS)
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_ORDERS)
+    Dim colCode As Long, colPlatform As Long, colSeller As Long, colSupCode As Long, colSupArt As Long
+    colCode = PRIME_ColIndex(headers, "Код товара")
+    colPlatform = PRIME_ColIndex(headers, "От кого / площадка")
+    colSeller = PRIME_ColIndex(headers, "Продавец")
+    colSupCode = PRIME_ColIndex(headers, "Код поставщика")
+    colSupArt = PRIME_ColIndex(headers, "Артикул поставщика")
+
+    Dim lastRow As Long
+    lastRow = PRIME_FindLastRow(oSheet)
+    Dim resolved As Long, ambiguous As Long
+    resolved = 0 : ambiguous = 0
+
+    Dim r As Long
+    For r = 1 To lastRow
+        If oSheet.getCellByPosition(colCode, r).getString() = "" Then
+            Dim match As String
+            match = PRIME_FindProductByAlias( _
+                oSheet.getCellByPosition(colPlatform, r).getString(), _
+                oSheet.getCellByPosition(colSeller, r).getString(), _
+                oSheet.getCellByPosition(colSupCode, r).getString(), _
+                oSheet.getCellByPosition(colSupArt, r).getString())
+            If match = PRIME_ALIAS_AMBIGUOUS Then
+                ambiguous = ambiguous + 1
+            ElseIf match <> PRIME_ALIAS_NOT_FOUND Then
+                oSheet.getCellByPosition(colCode, r).setString(match)
+                PRIME_Orders_AutofillByCode(oSheet, headers, r)
+                resolved = resolved + 1
+            End If
+        End If
+    Next r
+
+    MsgBox "Распознано по артикулу: " & resolved & ". Неоднозначных (требуют ручного выбора): " & ambiguous & "."
+End Sub
+
 Public Sub PRIME_Orders_FillAllByCodeButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_ORDERS)

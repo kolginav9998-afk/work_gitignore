@@ -175,14 +175,89 @@ Public Sub PRIME_StockOrders_RefreshButton()
     PRIME_AppendRowsBatch(SH_STOCK_ORDERS, outRows)
 End Sub
 
+' Список партий конкретного товара с их текущим балансом (WMS_STOCK_LOTS-аналог) - пишет в лист
+' "База - Поиск" в том же формате, что и обычный поиск, чтобы не заводить ещё один лист.
+Public Sub PRIME_Stock_ShowLotsByCodeButton()
+    Dim code As String
+    code = InputBox("Внутренний код товара:", "Партии товара")
+    If Trim(code) = "" Then Exit Sub
+    code = Trim(code)
+
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(SH_SEARCH)
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SEARCH)
+    Dim lastRow As Long
+    lastRow = PRIME_FindLastRow(oSheet)
+    If lastRow >= 1 Then
+        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
+    End If
+
+    Dim lots() As String
+    Dim balances() As Double
+    PRIME_FifoLotsForProduct(code, lots, balances)
+    If UBound(lots) < LBound(lots) Then
+        MsgBox "У товара " & code & " нет партий."
+        Exit Sub
+    End If
+
+    Dim lotHeaders As Variant
+    lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
+    Dim lotTable As Variant
+    lotTable = PRIME_ReadTable(SH_DB_LOTS)
+    Dim colLotId As Long, colDate As Long, colLoc As Long
+    colLotId = PRIME_ColIndex(lotHeaders, "LOT_ID")
+    colDate = PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")
+    colLoc = PRIME_ColIndex(lotHeaders, "LOCATION")
+
+    Dim outRows(UBound(lots)) As Variant
+    Dim i As Long
+    For i = LBound(lots) To UBound(lots)
+        Dim idx As Long
+        idx = PRIME_FindRowByKey(lotTable, colLotId, lots(i))
+        Dim row(UBound(headers)) As Variant
+        row(PRIME_ColIndex(headers, "Тип")) = "LOT"
+        row(PRIME_ColIndex(headers, "Код")) = code
+        row(PRIME_ColIndex(headers, "Наименование")) = PRIME_GetProductField(code, "PRODUCT_NAME")
+        row(PRIME_ColIndex(headers, "Количество")) = balances(i)
+        If idx >= 0 Then
+            row(PRIME_ColIndex(headers, "Дата")) = CStr(lotTable(idx)(colDate))
+            row(PRIME_ColIndex(headers, "Подробности")) = "LOT_ID: " & lots(i) & "; Место: " & CStr(lotTable(idx)(colLoc))
+        Else
+            row(PRIME_ColIndex(headers, "Подробности")) = "LOT_ID: " & lots(i)
+        End If
+        outRows(i) = row
+    Next i
+    PRIME_AppendRowsBatch(SH_SEARCH, outRows)
+End Sub
+
+Public Sub PRIME_Search_ClearButton()
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(SH_SEARCH)
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SEARCH)
+    Dim lastRow As Long
+    lastRow = PRIME_FindLastRow(oSheet)
+    If lastRow >= 1 Then
+        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
+    End If
+End Sub
+
 ' === База - Поиск ===============================================================================
 ' batch_search по документам/строкам/партиям сразу по нескольким полям (search.search_fields).
 Public Sub PRIME_Search_RunButton()
     Dim query As String
     query = InputBox("Поиск (код, наименование, ORDER_ID, DOC_ID, LOT_ID, получатель...):", "База - Поиск")
     If Trim(query) = "" Then Exit Sub
-    query = LCase(Trim(query))
+    PRIME_Search_Execute(LCase(Trim(query)))
+End Sub
 
+' "Показать всё" - тот же вывод, без фильтра по подстроке.
+Public Sub PRIME_Search_ShowAllButton()
+    PRIME_Search_Execute("")
+End Sub
+
+Private Sub PRIME_Search_Execute(ByVal query As String)
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_SEARCH)
     Dim headers As Variant
