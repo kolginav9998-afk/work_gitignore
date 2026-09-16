@@ -213,6 +213,86 @@ Public Function PRIME_WorkflowIssueColumns() As Variant
     PRIME_WorkflowIssueColumns = cols
 End Function
 
+' === Схемы скрытых системных листов (используются PRIME_14_MigrationInstaller.PRIME_Install_EnsureSchema
+' и должны буквально совпадать с полями, которые читают/пишут PRIME_02_Store/03_Catalog/04_Posting -
+' единственное место, где заводится новое поле, это одновременно и здесь, и в коде, который его использует).
+
+Public Function PRIME_SysMetaColumns() As Variant
+    PRIME_SysMetaColumns = Array("KEY", "VALUE")
+End Function
+
+Public Function PRIME_SysSeqColumns() As Variant
+    PRIME_SysSeqColumns = Array("SEQ_NAME", "NEXT_VALUE")
+End Function
+
+Public Function PRIME_SysTxColumns() As Variant
+    PRIME_SysTxColumns = Array("OP_ID", "SOURCE_KEY", "DOC_ID", "STATE", "STARTED_AT", "COMMITTED_AT", "HASH", "ERROR")
+End Function
+
+Public Function PRIME_DbProductsColumns() As Variant
+    PRIME_DbProductsColumns = Array("PRODUCT_CODE", "PRODUCT_NAME", "BASE_UNIT", "DEFAULT_LOCATION", _
+        "CATEGORY", "SUBCATEGORY", "RETURNABLE", "ACCOUNT_TYPE", "ACTIVE", "CREATED_AT", "UPDATED_AT")
+End Function
+
+Public Function PRIME_DbAliasesColumns() As Variant
+    PRIME_DbAliasesColumns = Array("ALIAS_ID", "PRODUCT_CODE", "PLATFORM", "SELLER", "SUPPLIER_CODE", _
+        "SUPPLIER_ARTICLE", "COMMENT", "ACTIVE")
+End Function
+
+Public Function PRIME_DbProductUnitsColumns() As Variant
+    PRIME_DbProductUnitsColumns = Array("PRODUCT_CODE", "UNIT_NAME", "FACTOR_TO_BASE", "ACTIVE")
+End Function
+
+Public Function PRIME_DbDocumentsColumns() As Variant
+    PRIME_DbDocumentsColumns = Array("DOC_ID", "DOC_TYPE", "DOC_DATE", "SOURCE_SHEET", "SOURCE_KEY", "ORDER_ID", "STATUS")
+End Function
+
+Public Function PRIME_DbDocLinesColumns() As Variant
+    PRIME_DbDocLinesColumns = Array("DOC_LINE_ID", "DOC_ID", "PRODUCT_CODE", "QTY_BASE", "UNIT", "PRICE", _
+        "LOCATION_FROM", "LOCATION_TO", "DESTINATION_PROJECT", "RECIPIENT", "COMMENT")
+End Function
+
+Public Function PRIME_DbMovementsColumns() As Variant
+    PRIME_DbMovementsColumns = Array("MOVE_ID", "DOC_ID", "DOC_LINE_ID", "PRODUCT_CODE", "LOT_ID", "QTY_BASE", _
+        "LOCATION", "MOVE_DATE", "OP_ID")
+End Function
+
+Public Function PRIME_DbLotsColumns() As Variant
+    PRIME_DbLotsColumns = Array("LOT_ID", "PRODUCT_CODE", "RECEIPT_DOC_ID", "RECEIPT_LINE_ID", "RECEIPT_DATE", _
+        "LOCATION", "ORIGINAL_QTY_BASE", "BASE_UNIT", "ORIGIN", "ORDER_ID")
+End Function
+
+Public Function PRIME_DbAllocationsColumns() As Variant
+    PRIME_DbAllocationsColumns = Array("ALLOC_ID", "DOC_LINE_ID", "LOT_ID", "QTY_BASE")
+End Function
+
+Public Function PRIME_DbReturnsColumns() As Variant
+    PRIME_DbReturnsColumns = Array("RETURN_ID", "ORIGINAL_ISSUE_DOC_LINE_ID", "RETURN_DOC_ID", "QTY_BASE", "RETURN_DATE")
+End Function
+
+Public Function PRIME_DbOrderSnapshotColumns() As Variant
+    PRIME_DbOrderSnapshotColumns = Array("ORDER_ID", "RECEIPT_DOC_ID", "LOT_ID", "DELIVERY_QTY", "PRODUCT_CODE", "DOC_DATE")
+End Function
+
+' DB_PRIME_KITS/KIT_LINES заведены структурно (system_sheets), но в первом релизе фактическим
+' источником данных комплектов служит видимый плоский лист "Комплекты" (PRIME_KitsColumns) -
+' см. PRIME_11_Kits и известные ограничения в финальном отчёте.
+Public Function PRIME_DbKitsColumns() As Variant
+    PRIME_DbKitsColumns = Array("KIT_ID", "NAME", "VERSION", "ACTIVE")
+End Function
+
+Public Function PRIME_DbKitLinesColumns() As Variant
+    PRIME_DbKitLinesColumns = Array("KIT_ID", "PRODUCT_CODE", "QTY_PER_KIT", "UNIT")
+End Function
+
+Public Function PRIME_DbActsColumns() As Variant
+    PRIME_DbActsColumns = Array("ACT_ID", "DOC_ID", "FILE_PATH", "GENERATED_AT", "STATUS")
+End Function
+
+Public Function PRIME_DbAuditColumns() As Variant
+    PRIME_DbAuditColumns = Array("TS", "OP_ID", "STAGE", "DURATION_MS", "SHEET", "ROW", "ERROR_NO", "ERROR_TEXT")
+End Function
+
 ' Единая скрытая helper-колонка для всех 4 workflow-листов (стабильный SOURCE_KEY, по аналогии с Issues).
 Public Function PRIME_WorkflowHiddenColumns() As Variant
     Dim cols(0) As String
