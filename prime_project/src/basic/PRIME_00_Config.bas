@@ -74,6 +74,9 @@ Public Const TX_CANCELLED As String = "CANCELLED"
 
 ' --- Лимиты производительности / устойчивости ---
 Public Const PRIME_QTY_PRECISION_DIGITS As Integer = 6
+' Должно совпадать с "Lines(99) As PrimeDocLine" в каждой копии Type PrimeDocPlan
+' (PRIME_04_Posting и модули 05/06/07/08, дублирующие Type - см. их комментарии).
+Public Const PRIME_DOC_PLAN_MAX_LINE_INDEX As Long = 99
 Public Const PRIME_IMPORT_TARGET_ROWS As Long = 20000
 Public Const PRIME_MAX_EVENT_ROWS As Long = 1 ' PRIME_OnContentChanged всегда обрабатывает одну строку
 

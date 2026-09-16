@@ -1,5 +1,35 @@
 Option Explicit
 
+' Дублируем определение типов из PRIME_04_Posting - StarBasic не поддерживает совместное
+' использование Type между модулями (Type виден только в модуле, где объявлен), поэтому
+' идентичное объявление нужно в каждом модуле, который строит PrimeDocPlan/PrimeDocLine.
+Type PrimeDocLine
+    ProductCode As String
+    ProductName As String
+    QtyInput As Double
+    UnitInput As String
+    LocationFrom As String
+    LocationTo As String
+    DestinationProject As String
+    Recipient As String
+    Comment As String
+    Price As Double
+    OriginalDocLineId As String
+    QtyBase As Double
+    LotId As String
+End Type
+
+Type PrimeDocPlan
+    DocType As String
+    DocDate As String
+    SourceSheet As String
+    SourceKey As String
+    OrderId As String
+    Lines(99) As PrimeDocLine
+    LineCount As Long
+End Type
+
+
 ' PRIME_06_Issues
 ' Лист "Выдачи": 12 исходных бизнес-колонок 1.4.1 без изменений + "Назначение / проект"
 ' (add_fields) + 1 скрытая helper-колонка _PRIME_IssueState (стабильный ISSUE_DRAFT_ID).
@@ -151,15 +181,15 @@ Public Sub PRIME_Issues_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     Dim plan As PrimeDocPlan
     PRIME_InitPlan(plan, DOC_ISSUE, SH_ISSUES, draftId)
 
-    Dim line As PrimeDocLine
-    line.ProductCode = code
-    line.QtyInput = CDbl(qtyStr)
-    line.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
-    line.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Откуда"), row).getString()
-    line.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кто получил"), row).getString()
-    line.DestinationProject = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Назначение / проект"), row).getString()
-    line.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Примечание"), row).getString()
-    PRIME_PlanAddLine(plan, line)
+    Dim docLine As PrimeDocLine
+    docLine.ProductCode = code
+    docLine.QtyInput = CDbl(qtyStr)
+    docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
+    docLine.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Откуда"), row).getString()
+    docLine.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кто получил"), row).getString()
+    docLine.DestinationProject = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Назначение / проект"), row).getString()
+    docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Примечание"), row).getString()
+    PRIME_PlanAddLine(plan, docLine)
 
     Dim docId As String
     docId = PRIME_PostDocument(plan)

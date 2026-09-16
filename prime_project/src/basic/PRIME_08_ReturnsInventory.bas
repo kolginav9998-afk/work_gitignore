@@ -1,5 +1,35 @@
 Option Explicit
 
+' Дублируем определение типов из PRIME_04_Posting - StarBasic не поддерживает совместное
+' использование Type между модулями (Type виден только в модуле, где объявлен), поэтому
+' идентичное объявление нужно в каждом модуле, который строит PrimeDocPlan/PrimeDocLine.
+Type PrimeDocLine
+    ProductCode As String
+    ProductName As String
+    QtyInput As Double
+    UnitInput As String
+    LocationFrom As String
+    LocationTo As String
+    DestinationProject As String
+    Recipient As String
+    Comment As String
+    Price As Double
+    OriginalDocLineId As String
+    QtyBase As Double
+    LotId As String
+End Type
+
+Type PrimeDocPlan
+    DocType As String
+    DocDate As String
+    SourceSheet As String
+    SourceKey As String
+    OrderId As String
+    Lines(99) As PrimeDocLine
+    LineCount As Long
+End Type
+
+
 ' PRIME_08_ReturnsInventory
 ' "Возвраты" - единственный механизм возврата (заменяет конфликтующие модули 08/23 из 1.4.1).
 ' "Инвентаризация" - снимок остатков, ввод факта, разница проводится как ADJUSTMENT только
@@ -169,14 +199,14 @@ Public Sub PRIME_Returns_ConductButton()
             Dim plan As PrimeDocPlan
             PRIME_InitPlan(plan, DOC_RETURN, SH_RETURNS, state)
 
-            Dim line As PrimeDocLine
-            line.ProductCode = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код"), r).getString()
-            line.QtyInput = CDbl(qtyStr)
-            line.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), r).getString()
-            line.LocationTo = PRIME_GetProductField(line.ProductCode, "DEFAULT_LOCATION")
-            line.OriginalDocLineId = originalLineId
-            line.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Комментарий"), r).getString()
-            PRIME_PlanAddLine(plan, line)
+            Dim docLine As PrimeDocLine
+            docLine.ProductCode = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код"), r).getString()
+            docLine.QtyInput = CDbl(qtyStr)
+            docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), r).getString()
+            docLine.LocationTo = PRIME_GetProductField(docLine.ProductCode, "DEFAULT_LOCATION")
+            docLine.OriginalDocLineId = originalLineId
+            docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Комментарий"), r).getString()
+            PRIME_PlanAddLine(plan, docLine)
 
             Dim docId As String
             docId = PRIME_PostDocument(plan)
@@ -326,13 +356,13 @@ Public Sub PRIME_Inventory_ConductButton()
             Else
                 Dim plan As PrimeDocPlan
                 PRIME_InitPlan(plan, DOC_ADJUSTMENT, SH_INVENTORY, sessionId & "|" & code & "|" & oSheet.getCellByPosition(colLoc, r).getString())
-                Dim line As PrimeDocLine
-                line.ProductCode = code
-                line.QtyInput = CDbl(diffStr)
-                line.UnitInput = oSheet.getCellByPosition(colUnit, r).getString()
-                line.LocationTo = oSheet.getCellByPosition(colLoc, r).getString()
-                line.Comment = "Инвентаризация " & sessionId
-                PRIME_PlanAddLine(plan, line)
+                Dim docLine As PrimeDocLine
+                docLine.ProductCode = code
+                docLine.QtyInput = CDbl(diffStr)
+                docLine.UnitInput = oSheet.getCellByPosition(colUnit, r).getString()
+                docLine.LocationTo = oSheet.getCellByPosition(colLoc, r).getString()
+                docLine.Comment = "Инвентаризация " & sessionId
+                PRIME_PlanAddLine(plan, docLine)
 
                 Dim docId As String
                 docId = PRIME_PostDocument(plan)

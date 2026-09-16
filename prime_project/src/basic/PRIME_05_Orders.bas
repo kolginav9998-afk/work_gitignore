@@ -1,5 +1,35 @@
 Option Explicit
 
+' Дублируем определение типов из PRIME_04_Posting - StarBasic не поддерживает совместное
+' использование Type между модулями (Type виден только в модуле, где объявлен), поэтому
+' идентичное объявление нужно в каждом модуле, который строит PrimeDocPlan/PrimeDocLine.
+Type PrimeDocLine
+    ProductCode As String
+    ProductName As String
+    QtyInput As Double
+    UnitInput As String
+    LocationFrom As String
+    LocationTo As String
+    DestinationProject As String
+    Recipient As String
+    Comment As String
+    Price As Double
+    OriginalDocLineId As String
+    QtyBase As Double
+    LotId As String
+End Type
+
+Type PrimeDocPlan
+    DocType As String
+    DocDate As String
+    SourceSheet As String
+    SourceKey As String
+    OrderId As String
+    Lines(99) As PrimeDocLine
+    LineCount As Long
+End Type
+
+
 ' PRIME_05_Orders
 ' Лист "Заказы": 25 бизнес-колонок 1.4.1 без изменений + 4 расширенных + 3 скрытых helper-колонки
 ' (_PRIME_OrderID, _PRIME_LineID, _PRIME_State - avoid_many_hidden_columns, было 10 в 1.4.1).
@@ -231,14 +261,14 @@ Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     PRIME_InitPlan(plan, DOC_RECEIPT, SH_ORDERS, orderId & "|" & lineId & "|" & deliveryId)
     plan.OrderId = orderId
 
-    Dim line As PrimeDocLine
-    line.ProductCode = productCode
-    line.ProductName = productName
-    line.QtyInput = factQty
-    line.UnitInput = unit
-    line.LocationTo = location
-    line.Price = price
-    PRIME_PlanAddLine(plan, line)
+    Dim docLine As PrimeDocLine
+    docLine.ProductCode = productCode
+    docLine.ProductName = productName
+    docLine.QtyInput = factQty
+    docLine.UnitInput = unit
+    docLine.LocationTo = location
+    docLine.Price = price
+    PRIME_PlanAddLine(plan, docLine)
 
     Dim docId As String
     docId = PRIME_PostDocument(plan)

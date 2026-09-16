@@ -99,6 +99,13 @@ Public Sub PRIME_Install_EnsureBusinessSheet(ByVal sheetName As String, ByVal bu
 End Sub
 
 Public Sub PRIME_Install_EnsureAllBusinessSheetsButton()
+    PRIME_Install_EnsureAllBusinessSheetsSilent()
+    MsgBox "Все листы PRIME проверены/созданы."
+End Sub
+
+' Вариант без MsgBox - вызывается сборщиком (tools/build_ods.py) в headless-режиме, где
+' любой диалог означал бы зависание процесса сборки.
+Public Sub PRIME_Install_EnsureAllBusinessSheetsSilent()
     PRIME_Install_EnsureSchema()
     PRIME_Install_EnsureBusinessSheet(SH_ORDERS, PRIME_ArrayConcat(PRIME_OrdersBusinessColumns(), PRIME_OrdersExtraColumns()), PRIME_OrdersHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_ISSUES, PRIME_IssuesColumns(), PRIME_IssuesHiddenColumns())
@@ -116,7 +123,6 @@ Public Sub PRIME_Install_EnsureAllBusinessSheetsButton()
     PRIME_Install_EnsureBusinessSheet(SH_DASHBOARD, Array("Показатель", "Значение"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_REPORT_INPUT, Array("Показатель", "Значение"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_REPORT_FINAL, Array("Отчёт"), Array())
-    MsgBox "Все листы PRIME проверены/созданы."
 End Sub
 
 Private Function PRIME_ArrayConcat(ByVal a As Variant, ByVal b As Variant) As Variant
@@ -173,13 +179,35 @@ Public Sub PRIME_Install_DisableLegacyEvents()
             On Error Resume Next
             Dim oEvents As Object
             oEvents = PRIME_GetSheet(sheetNames(i)).Events
-            oEvents.revokeByName("OnContentChanged")
+            oEvents.revokeByName("OnChange") ' ключ события листа "Contents changed" в UNO - OnChange, не OnContentChanged
             On Error Goto 0
         End If
     Next i
 End Sub
 
 ' === Миграция 1.4.1 -> 2.0.0 =====================================================================
+' Zero-arg, no-dialog вариант миграции для сборщика (tools/build_ods.py) и автоматических тестов -
+' UNO script provider не умеет удобно принимать ByRef-массивы через invoke() извне, поэтому
+' здесь всё держится в локальных переменных одного вызова, без диалогов.
+Public Sub PRIME_Build_MigrateSilent()
+    PRIME_Install_DisableLegacyEvents()
+    PRIME_Install_EnsureSchema()
+    Dim oldCodes() As String
+    Dim newCodes() As String
+    Dim mapCount As Long
+    mapCount = PRIME_Migration_MigrateOrdersSheet(oldCodes, newCodes)
+    If mapCount > 0 Then
+        PRIME_Migration_RemapCodes(SH_ISSUES, "Код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_SHOP, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_SHOP, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_OFFICE, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
+    End If
+    PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)
+    PRIME_MetaSet("MIGRATED_AT", Format(Now, "YYYY-MM-DD HH:MM:SS"))
+    PRIME_MetaSet("MIGRATED_FROM", "1.4.1")
+End Sub
+
 Public Sub PRIME_Migration_RunButton()
     Dim answer As Integer
     answer = MsgBox("Выполнить миграцию 1.4.1 -> PRIME 2.0.0?" & Chr(10) & _

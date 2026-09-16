@@ -8,8 +8,10 @@ Option Explicit
 ' Никаких commit/rollback/DDL/store() здесь нет - это чистый доступ к диапазонам Calc
 ' (performance.preferred_range_api: getDataArray/setDataArray, батчами).
 
-Private gHeaderCache As Collection      ' key: имя листа -> Variant(массив заголовков)
-Private gCommittedKeyCache As Collection ' key: SOURCE_KEY -> DOC_ID, только для COMMITTED
+' As Object, не As Collection: StarBasic не позволяет отложенное объявление без New для
+' типа Collection (компилируется только "As New Collection" или "As Object" + Set при инициализации).
+Private gHeaderCache As Object      ' Collection: имя листа -> Variant(массив заголовков)
+Private gCommittedKeyCache As Object ' Collection: SOURCE_KEY -> DOC_ID, только для COMMITTED
 
 Private Function PRIME_Doc() As Object
     PRIME_Doc = ThisComponent
@@ -19,7 +21,7 @@ Public Function PRIME_GetSheet(ByVal sheetName As String) As Object
     Dim oSheets As Object
     oSheets = PRIME_Doc().getSheets()
     If Not oSheets.hasByName(sheetName) Then
-        Err.Raise(1001, "PRIME_Store.PRIME_GetSheet", "PRIME_Store: лист не найден: " & sheetName)
+        Err.Raise 1001, "PRIME_Store.PRIME_GetSheet", "PRIME_Store: лист не найден: " & sheetName
     End If
     PRIME_GetSheet = oSheets.getByName(sheetName)
 End Function
@@ -58,7 +60,7 @@ End Function
 ' при структурных изменениях (миграция/установка), не на каждый ввод.
 Public Function PRIME_HeaderMap(ByVal sheetName As String) As Variant
     If gHeaderCache Is Nothing Then
-        gHeaderCache = New Collection
+        Set gHeaderCache = New Collection
     End If
 
     Dim cached As Variant

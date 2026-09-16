@@ -5,7 +5,7 @@ Option Explicit
 ' database_connection_allowed=false: весь lookup идёт по memory index (Collection), построенному
 ' из DB_PRIME_PRODUCTS/DB_PRIME_ALIASES/DB_PRIME_PRODUCT_UNITS, а не поячейковым сканированием.
 
-Private gProductIndex As Collection   ' PRODUCT_CODE -> Variant(строка таблицы)
+Private gProductIndex As Object   ' Collection: PRODUCT_CODE -> Variant(строка таблицы)
 Private gProductIndexBuilt As Boolean
 
 Public Sub PRIME_BuildProductIndex()

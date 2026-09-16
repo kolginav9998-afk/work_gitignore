@@ -48,11 +48,13 @@ Public Sub PRIME_InitPlan(ByRef plan As PrimeDocPlan, ByVal docType As String, B
     plan.LineCount = 0
 End Sub
 
-Public Sub PRIME_PlanAddLine(ByRef plan As PrimeDocPlan, ByRef line As PrimeDocLine)
-    If plan.LineCount > UBound(plan.Lines) Then
-        Err.Raise(1010, "PRIME_Posting.PRIME_PlanAddLine", "Документ превышает лимит строк одной операции (100). Разбейте на несколько проведений.")
+' 99, не UBound(plan.Lines): StarBasic не компилирует UBound() на поле-массиве внутри Type -
+' граница держится в отдельной константе, синхронно с "Lines(99) As PrimeDocLine" в Type.
+Public Sub PRIME_PlanAddLine(ByRef plan As PrimeDocPlan, ByRef docLine As PrimeDocLine)
+    If plan.LineCount > PRIME_DOC_PLAN_MAX_LINE_INDEX Then
+        Err.Raise 1010, "PRIME_Posting.PRIME_PlanAddLine", "Документ превышает лимит строк одной операции (100). Разбейте на несколько проведений."
     End If
-    plan.Lines(plan.LineCount) = line
+    plan.Lines(plan.LineCount) = docLine
     plan.LineCount = plan.LineCount + 1
 End Sub
 
@@ -120,7 +122,7 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
         Case DOC_ADJUSTMENT
             PRIME_PostAdjustmentLines(docId, opId, plan)
         Case Else
-            Err.Raise(1011, "PRIME_Posting.PRIME_PostDocument", "Неизвестный тип документа: " & plan.DocType)
+            Err.Raise 1011, "PRIME_Posting.PRIME_PostDocument", "Неизвестный тип документа: " & plan.DocType
     End Select
     PRIME_AuditLog(opId, STAGE_MOVEMENTS_WRITTEN, plan.SourceSheet, docId)
 
@@ -488,7 +490,7 @@ Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, By
         If remaining > 0.0000005 Then
             ' Не должно происходить после PRIME_ValidateIssue, но перестраховка важнее красоты кода:
             ' не допускаем частично проведённый документ.
-            Err.Raise(1020, "PRIME_Posting.PRIME_PostIssueLines", "Недостаточно партий для списания строки " & (i + 1) & " после валидации - проведение отменено.")
+            Err.Raise 1020, "PRIME_Posting.PRIME_PostIssueLines", "Недостаточно партий для списания строки " & (i + 1) & " после валидации - проведение отменено."
         End If
     Next i
 
