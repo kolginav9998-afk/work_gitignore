@@ -297,7 +297,7 @@ End Sub
 ' batch_search по документам/строкам/партиям сразу по нескольким полям (search.search_fields).
 Public Sub PRIME_Search_RunButton()
     Dim query As String
-    query = InputBox("Поиск (код, наименование, ORDER_ID, DOC_ID, LOT_ID, получатель...):", "База - Поиск")
+    query = InputBox("Поиск (код, наименование, ORDER_ID, DOC_ID, LOT_ID, получатель...):", "Поиск")
     If Trim(query) = "" Then Exit Sub
     PRIME_Search_Execute(LCase(Trim(query)))
 End Sub

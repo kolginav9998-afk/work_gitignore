@@ -227,6 +227,7 @@ End Sub
 ' PRIME_Install_EnsureAllBusinessSheetsButton про обязательное разделение top-level invoke().
 Public Sub PRIME_Install_EnsureAllBusinessSheetsOnly()
     PRIME_Migration_RenameStockToNalichie()
+    PRIME_Migration_RenameSearchToPoisk()
     PRIME_Install_EnsureBusinessSheet(SH_ORDERS, PRIME_ArrayConcat(PRIME_OrdersBusinessColumns(), PRIME_OrdersExtraColumns()), PRIME_OrdersHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_ISSUES, PRIME_IssuesColumns(), PRIME_IssuesHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_SHOP, PRIME_WorkflowReceiptColumns(SH_RECEIPT_SHOP), PRIME_WorkflowHiddenColumns())
@@ -260,6 +261,19 @@ Public Sub PRIME_Migration_RenameStockToNalichie()
     oSheets.getByName(SH_STOCK_LEGACY_NAME).Name = SH_STOCK
     PRIME_InvalidateHeaderCache(SH_STOCK_LEGACY_NAME)
     PRIME_InvalidateHeaderCache(SH_STOCK)
+End Sub
+
+' 2.1.2: тот же приём (см. комментарий у PRIME_Migration_RenameStockToNalichie), для
+' "База - Поиск" -> "Поиск" (короче, единообразно с остальными листами - ни у одного другого
+' пользовательского листа нет составного "База - " префикса).
+Public Sub PRIME_Migration_RenameSearchToPoisk()
+    Dim oSheets As Object
+    oSheets = ThisComponent.Sheets
+    If oSheets.hasByName(SH_SEARCH) Then Exit Sub ' уже переименован в этом или предыдущем запуске
+    If Not oSheets.hasByName(SH_SEARCH_LEGACY_NAME) Then Exit Sub ' новая книга - EnsureBusinessSheet создаст сама
+    oSheets.getByName(SH_SEARCH_LEGACY_NAME).Name = SH_SEARCH
+    PRIME_InvalidateHeaderCache(SH_SEARCH_LEGACY_NAME)
+    PRIME_InvalidateHeaderCache(SH_SEARCH)
 End Sub
 
 ' R27 (2.1.0): легаси-формы 1.4.1 "Приход/Расход — Производство/Детали" убираются из

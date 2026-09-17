@@ -180,10 +180,12 @@ BUTTON_MAP = {
     ("Наличие", "WMS_STOCK_LOTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowLotsByCodeButton",
     ("Наличие", "WMS_STOCK_SEARCH"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
     ("Наличие", "WMS_STOCK_DIAG"): "Standard.PRIME_13_Diagnostics.PRIME_Diagnostics_RunButton",
-    # База - Поиск
-    ("База - Поиск", "WMS_S2_FIND"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
-    ("База - Поиск", "WMS_S2_ALL"): "Standard.PRIME_09_StockSearch.PRIME_Search_ShowAllButton",
-    ("База - Поиск", "WMS_S2_CLEAR"): "Standard.PRIME_09_StockSearch.PRIME_Search_ClearButton",
+    # Поиск (2.1.2: переименован из "База - Поиск" ДО этой стадии сборки - см.
+    # PRIME_14_MigrationInstaller.PRIME_Migration_RenameSearchToPoisk, вызывается раньше в
+    # конвейере, поэтому ключ здесь - уже новое имя, как и у "Наличие" выше)
+    ("Поиск", "WMS_S2_FIND"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
+    ("Поиск", "WMS_S2_ALL"): "Standard.PRIME_09_StockSearch.PRIME_Search_ShowAllButton",
+    ("Поиск", "WMS_S2_CLEAR"): "Standard.PRIME_09_StockSearch.PRIME_Search_ClearButton",
     # Справочники
     ("Справочники", "WMS_REF_SAVE"): HIDE,
     ("Справочники", "WMS_REF_REFRESH"): HIDE,
