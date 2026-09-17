@@ -22,33 +22,49 @@ End Sub
 
 Public Sub PRIME_Stock_SearchByCodeButton()
     Dim code As String
-    code = InputBox("Внутренний код товара:", "Остаток по коду")
+    code = InputBox("Внутренний код товара:", "Наличие по коду")
     If code = "" Then Exit Sub
     PRIME_Stock_Rebuild("CODE", Trim(code))
 End Sub
 
-' Дополнительные фильтры остатка (recommendation §32): категория/подкатегория/место хранения.
+' Дополнительные фильтры (recommendation §32): категория/подкатегория/место хранения.
 Public Sub PRIME_Stock_ShowByCategoryButton()
     Dim value As String
-    value = InputBox("Категория:", "Остаток по категории")
+    value = InputBox("Категория:", "Наличие по категории")
     If Trim(value) = "" Then Exit Sub
     PRIME_Stock_Rebuild("CATEGORY", Trim(value))
 End Sub
 
 Public Sub PRIME_Stock_ShowBySubcategoryButton()
     Dim value As String
-    value = InputBox("Подкатегория:", "Остаток по подкатегории")
+    value = InputBox("Подкатегория:", "Наличие по подкатегории")
     If Trim(value) = "" Then Exit Sub
     PRIME_Stock_Rebuild("SUBCATEGORY", Trim(value))
 End Sub
 
 Public Sub PRIME_Stock_ShowByLocationButton()
     Dim value As String
-    value = InputBox("Место хранения:", "Остаток по месту хранения")
+    value = InputBox("Место хранения:", "Наличие по месту хранения")
     If Trim(value) = "" Then Exit Sub
     PRIME_Stock_Rebuild("LOCATION", Trim(value))
 End Sub
 
+' 2.1.0 (R24): быстрые фильтры сводного листа "Наличие" по контуру - Склад/Детали цеха/Офис.
+Public Sub PRIME_Stock_ShowContourGeneralButton()
+    PRIME_Stock_Rebuild("CONTOUR", SC_GENERAL)
+End Sub
+
+Public Sub PRIME_Stock_ShowContourWorkshopButton()
+    PRIME_Stock_Rebuild("CONTOUR", SC_WORKSHOP_DETAILS)
+End Sub
+
+Public Sub PRIME_Stock_ShowContourOfficeButton()
+    PRIME_Stock_Rebuild("CONTOUR", SC_OFFICE)
+End Sub
+
+' R24: "Наличие" - сводный обзор по (товар, контур, место), не обязательный ежедневный экран
+' (актуальный остаток дублируется inline на рабочих листах - см. PRIME_05_Orders/06_Issues/
+' 07_Workflows). Источник - те же COMMITTED-движения, что и весь остальной остаток/FIFO.
 Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As String)
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_STOCK)
@@ -62,19 +78,20 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
     If Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then Exit Sub
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colProduct As Long, colLoc As Long, colQty As Long, colDate As Long, colOpId As Long
+    Dim colProduct As Long, colLoc As Long, colQty As Long, colDate As Long, colOpId As Long, colContour As Long
     colProduct = PRIME_ColIndex(moveHeaders, "PRODUCT_CODE")
     colLoc = PRIME_ColIndex(moveHeaders, "LOCATION")
     colQty = PRIME_ColIndex(moveHeaders, "QTY_BASE")
     colDate = PRIME_ColIndex(moveHeaders, "MOVE_DATE")
     colOpId = PRIME_ColIndex(moveHeaders, "OP_ID")
+    colContour = PRIME_ColIndex(moveHeaders, "STOCK_CONTOUR")
 
     Dim moveTable As Variant
     moveTable = PRIME_ReadTable(SH_DB_MOVEMENTS)
     If UBound(moveTable) < 1 Then Exit Sub
 
-    ' Агрегация product|location -> (qty, lastDate), через параллельные массивы (см. PRIME_03_Catalog
-    ' для объяснения, почему не Collection с перечислением ключей).
+    ' Агрегация product|contour|location -> (qty, lastDate), через параллельные массивы (см.
+    ' PRIME_03_Catalog для объяснения, почему не Collection с перечислением ключей).
     Dim keys() As String
     Dim qtys() As Double
     Dim lastDates() As String
@@ -86,18 +103,21 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
 
     Dim i As Long, j As Long
     For i = 1 To UBound(moveTable)
-        Dim pc As String, loc As String
+        Dim pc As String, loc As String, ctr As String
         pc = CStr(moveTable(i)(colProduct))
+        ctr = ""
+        If colContour >= 0 Then ctr = CStr(moveTable(i)(colContour))
         If filterMode = "CODE" And pc <> filterValue Then GoTo ContinueLoop
         If filterMode = "CATEGORY" And LCase(PRIME_GetProductField(pc, "CATEGORY")) <> LCase(filterValue) Then GoTo ContinueLoop
         If filterMode = "SUBCATEGORY" And LCase(PRIME_GetProductField(pc, "SUBCATEGORY")) <> LCase(filterValue) Then GoTo ContinueLoop
         If filterMode = "LOCATION" And LCase(CStr(moveTable(i)(colLoc))) <> LCase(filterValue) Then GoTo ContinueLoop
-        ' committed_only_stock (2.0.1): лист "Остаток" не должен показывать PREPARED/FAILED
+        If filterMode = "CONTOUR" And ctr <> filterValue Then GoTo ContinueLoop
+        ' committed_only_stock (2.0.1): лист "Наличие" не должен показывать PREPARED/FAILED
         ' движения как реальный остаток - см. PRIME_04_Posting.PRIME_LotBalance.
         If Not PRIME_IsOpIdCommitted(CStr(moveTable(i)(colOpId))) Then GoTo ContinueLoop
         loc = CStr(moveTable(i)(colLoc))
         Dim k As String
-        k = pc & "|" & loc
+        k = pc & "|" & ctr & "|" & loc
         Dim foundIdx As Long
         foundIdx = -1
         For j = 0 To n - 1
@@ -137,8 +157,9 @@ ContinueLoop:
             Dim row(UBound(headers)) As Variant
             row(PRIME_ColIndex(headers, "Код")) = parts(0)
             row(PRIME_ColIndex(headers, "Наименование")) = PRIME_GetProductField(parts(0), "PRODUCT_NAME")
+            row(PRIME_ColIndex(headers, "Контур")) = PRIME_ContourDisplayName(parts(1))
+            row(PRIME_ColIndex(headers, "Место хранения")) = parts(2)
             row(PRIME_ColIndex(headers, "Ед. изм.")) = PRIME_GetProductField(parts(0), "BASE_UNIT")
-            row(PRIME_ColIndex(headers, "Место хранения")) = parts(1)
             row(PRIME_ColIndex(headers, "Остаток")) = qtys(i)
             row(PRIME_ColIndex(headers, "Последняя операция")) = lastDates(i)
             outRows(outN) = row
@@ -218,7 +239,7 @@ Public Sub PRIME_Stock_ShowLotsByCodeButton()
 
     Dim lots() As String
     Dim balances() As Double
-    PRIME_FifoLotsForProduct(code, lots, balances)
+    PRIME_FifoLotsForProductAny(code, lots, balances)
     If UBound(lots) < LBound(lots) Then
         MsgBox "У товара " & code & " нет партий."
         Exit Sub

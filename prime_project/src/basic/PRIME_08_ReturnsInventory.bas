@@ -6,15 +6,20 @@ Option Explicit
 Type PrimeDocLine
     ProductCode As String
     ProductName As String
+    IsNewProduct As Boolean
     QtyInput As Double
     UnitInput As String
     LocationFrom As String
     LocationTo As String
+    Contour As String
+    ContourFrom As String
+    ContourTo As String
     DestinationProject As String
     Recipient As String
     Comment As String
     Price As Double
     OriginalDocLineId As String
+    OrderLineId As String
     QtyBase As Double
     LotId As String
 End Type
@@ -25,7 +30,7 @@ Type PrimeDocPlan
     SourceSheet As String
     SourceKey As String
     OrderId As String
-    Lines(99) As PrimeDocLine
+    Lines(999) As PrimeDocLine
     LineCount As Long
 End Type
 
@@ -164,6 +169,10 @@ CleanExit:
     PRIME_EventLeave()
 End Sub
 
+' R09 (2.1.0): все отмеченные строки возврата проводятся ОДНИМ документом (один DOC_ID/OP_ID/
+' один store()), а не циклом отдельных PostDocument-вызовов на каждую строку - раньше N строк
+' возврата означали N документов и N store(), без атомарности "весь батч либо целиком, либо
+' никак" и с лишними файловыми сохранениями.
 Public Sub PRIME_Returns_ConductButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_RETURNS)
@@ -176,8 +185,12 @@ Public Sub PRIME_Returns_ConductButton()
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    Dim posted As Long
-    posted = 0
+
+    Dim plan As PrimeDocPlan
+    PRIME_InitPlan(plan, DOC_RETURN, SH_RETURNS, "")
+    Dim rowForLine(999) As Long
+    Dim batchKey As String
+    batchKey = ""
 
     Dim r As Long
     For r = PRIME_FormSchemaFirstDataRow(SH_RETURNS) To lastRow
@@ -190,35 +203,41 @@ Public Sub PRIME_Returns_ConductButton()
                 state = "RET:" & Format(Now, "YYYYMMDDHHMMSS") & Int(Rnd * 9999) & "-" & r
                 oSheet.getCellByPosition(colState, r).setString(state)
             End If
-
-            Dim originalLineId As String
-            originalLineId = oSheet.getCellByPosition(colOriginalLine, r).getString()
-
-            Dim plan As PrimeDocPlan
-            PRIME_InitPlan(plan, DOC_RETURN, SH_RETURNS, state)
+            batchKey = batchKey & state & ","
 
             Dim docLine As PrimeDocLine
             docLine.ProductCode = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код"), r).getString()
             docLine.QtyInput = CDbl(qtyStr)
             docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), r).getString()
             docLine.LocationTo = PRIME_GetProductField(docLine.ProductCode, "DEFAULT_LOCATION")
-            docLine.OriginalDocLineId = originalLineId
+            docLine.Contour = SC_GENERAL
+            docLine.OriginalDocLineId = oSheet.getCellByPosition(colOriginalLine, r).getString()
             docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Комментарий"), r).getString()
+            rowForLine(plan.LineCount) = r
             PRIME_PlanAddLine(plan, docLine)
-
-            Dim docId As String
-            docId = PRIME_PostDocument(plan)
-            If docId = "" Then
-                MsgBox "Строка " & (r + 1) & ": возврат не проведён - " & PRIME_LastPostError()
-            Else
-                oSheet.getCellByPosition(colReturnNow, r).setString("")
-                oSheet.getCellByPosition(colState, r).setString("")
-                posted = posted + 1
-            End If
         End If
     Next r
 
-    MsgBox "Проведено возвратов: " & posted
+    If plan.LineCount = 0 Then
+        MsgBox "Нет строк с заполненным ""Вернуть сейчас""."
+        Exit Sub
+    End If
+    plan.SourceKey = "BATCH:" & batchKey
+
+    Dim docId As String
+    docId = PRIME_PostDocument(plan)
+    If docId = "" Then
+        MsgBox "Возврат не проведён: " & PRIME_LastPostError()
+        Exit Sub
+    End If
+
+    Dim i As Long
+    For i = 0 To plan.LineCount - 1
+        oSheet.getCellByPosition(colReturnNow, rowForLine(i)).setString("")
+        oSheet.getCellByPosition(colState, rowForLine(i)).setString("")
+    Next i
+
+    MsgBox "Проведено возвратов: " & plan.LineCount & " (документ " & docId & ")"
     PRIME_Returns_RefreshButton()
 End Sub
 
@@ -259,7 +278,10 @@ Public Sub PRIME_Inventory_LoadButton()
             code = CStr(prodTable(p)(colCode))
             Dim locations() As String
             Dim quantities() As Double
-            PRIME_StockByLocation(code, locations, quantities)
+            Dim contours() As String
+            ' contourFilter="" - снимаем остаток по КАЖДОМУ (месту, контуру) отдельно (R06):
+            ' один и тот же код на одном месте, но в разных контурах, не должен задваивать разницу.
+            PRIME_StockByLocation(code, "", locations, quantities, contours)
             If UBound(locations) >= LBound(locations) Then
                 Dim l As Long
                 For l = LBound(locations) To UBound(locations)
@@ -269,6 +291,7 @@ Public Sub PRIME_Inventory_LoadButton()
                         row(PRIME_ColIndex(headers, "Код")) = code
                         row(PRIME_ColIndex(headers, "Наименование")) = CStr(prodTable(p)(colName))
                         row(PRIME_ColIndex(headers, "Место")) = locations(l)
+                        row(PRIME_ColIndex(headers, "Контур")) = contours(l)
                         row(PRIME_ColIndex(headers, "Категория")) = CStr(prodTable(p)(colCat))
                         row(PRIME_ColIndex(headers, "Подкатегория")) = CStr(prodTable(p)(colSub))
                         row(PRIME_ColIndex(headers, "Учёт")) = quantities(l)
@@ -316,22 +339,32 @@ End Sub
 
 ' inventory.workflow: перед проведением проверяем движения после снимка сессии - конфликтную
 ' строку пропускаем с сообщением, а не проводим вслепую.
+' R06/R09 (2.1.0): все неконфликтные строки разницы проводятся ОДНИМ ADJUSTMENT-документом
+' (один DOC_ID/OP_ID/один store()), контур берётся из колонки "Контур" (см.
+' PRIME_Inventory_LoadButton) - PostAdjustmentLines теперь консервативно списывает/создаёт
+' реальные партии, поэтому stock == sum(lots) гарантированно после проведения (R06).
 Public Sub PRIME_Inventory_ConductButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_INVENTORY)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_INVENTORY)
-    Dim colSession As Long, colCode As Long, colLoc As Long, colDiff As Long, colUnit As Long
+    Dim colSession As Long, colCode As Long, colLoc As Long, colContour As Long, colDiff As Long, colUnit As Long
     colSession = PRIME_ColIndex(headers, "Сессия")
     colCode = PRIME_ColIndex(headers, "Код")
     colLoc = PRIME_ColIndex(headers, "Место")
+    colContour = PRIME_ColIndex(headers, "Контур")
     colDiff = PRIME_ColIndex(headers, "Разница")
     colUnit = PRIME_ColIndex(headers, "Ед. изм.")
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    Dim posted As Long, conflicts As Long
-    posted = 0 : conflicts = 0
+    Dim conflicts As Long
+    conflicts = 0
+
+    Dim plan As PrimeDocPlan
+    Dim sessionsInBatch As String
+    sessionsInBatch = ""
+    Dim rowForLine(999) As Long
 
     Dim r As Long
     For r = PRIME_FormSchemaFirstDataRow(SH_INVENTORY) To lastRow
@@ -348,27 +381,41 @@ Public Sub PRIME_Inventory_ConductButton()
             If PRIME_HasMovementsSince(code, snapshotAt) Then
                 conflicts = conflicts + 1
             Else
-                Dim plan As PrimeDocPlan
-                PRIME_InitPlan(plan, DOC_ADJUSTMENT, SH_INVENTORY, sessionId & "|" & code & "|" & oSheet.getCellByPosition(colLoc, r).getString())
+                If plan.LineCount = 0 Then PRIME_InitPlan(plan, DOC_ADJUSTMENT, SH_INVENTORY, "")
+                sessionsInBatch = sessionsInBatch & sessionId & "|" & code & "|" & oSheet.getCellByPosition(colLoc, r).getString() & ","
+
                 Dim docLine As PrimeDocLine
                 docLine.ProductCode = code
                 docLine.QtyInput = CDbl(diffStr)
                 docLine.UnitInput = oSheet.getCellByPosition(colUnit, r).getString()
                 docLine.LocationTo = oSheet.getCellByPosition(colLoc, r).getString()
+                docLine.Contour = oSheet.getCellByPosition(colContour, r).getString()
                 docLine.Comment = "Инвентаризация " & sessionId
+                rowForLine(plan.LineCount) = r
                 PRIME_PlanAddLine(plan, docLine)
-
-                Dim docId As String
-                docId = PRIME_PostDocument(plan)
-                If docId <> "" Then
-                    posted = posted + 1
-                    oSheet.getCellByPosition(colDiff, r).setString("проведено: " & docId)
-                End If
             End If
         End If
     Next r
 
-    MsgBox "Проведено корректировок: " & posted & ". Конфликтов (обновите остатки): " & conflicts
+    If plan.LineCount = 0 Then
+        MsgBox "Нет строк с разницей для проведения. Конфликтов (обновите остатки): " & conflicts
+        Exit Sub
+    End If
+    plan.SourceKey = "BATCH:" & sessionsInBatch
+
+    Dim docId As String
+    docId = PRIME_PostDocument(plan)
+    If docId = "" Then
+        MsgBox "Корректировка не проведена: " & PRIME_LastPostError()
+        Exit Sub
+    End If
+
+    Dim i As Long
+    For i = 0 To plan.LineCount - 1
+        oSheet.getCellByPosition(colDiff, rowForLine(i)).setString("проведено: " & docId)
+    Next i
+
+    MsgBox "Проведено корректировок: " & plan.LineCount & " (документ " & docId & "). Конфликтов (обновите остатки): " & conflicts
 End Sub
 
 Private Function PRIME_HasMovementsSince(ByVal productCode As String, ByVal sinceTs As String) As Boolean

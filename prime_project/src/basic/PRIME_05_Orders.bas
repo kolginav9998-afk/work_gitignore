@@ -6,15 +6,20 @@ Option Explicit
 Type PrimeDocLine
     ProductCode As String
     ProductName As String
+    IsNewProduct As Boolean
     QtyInput As Double
     UnitInput As String
     LocationFrom As String
     LocationTo As String
+    Contour As String
+    ContourFrom As String
+    ContourTo As String
     DestinationProject As String
     Recipient As String
     Comment As String
     Price As Double
     OriginalDocLineId As String
+    OrderLineId As String
     QtyBase As Double
     LotId As String
 End Type
@@ -25,7 +30,7 @@ Type PrimeDocPlan
     SourceSheet As String
     SourceKey As String
     OrderId As String
-    Lines(99) As PrimeDocLine
+    Lines(999) As PrimeDocLine
     LineCount As Long
 End Type
 
@@ -86,10 +91,30 @@ CleanExit:
     PRIME_EventLeave()
 End Sub
 
+' R22 (2.1.0): "В наличии сейчас" - представление того же COMMITTED-ledger, что и лист
+' "Наличие", всегда для контура SC_GENERAL (Заказы не работают с цеховым/офисным контуром) и
+' места, указанного в строке заказа. Пересчитывается тем же событием, что и статус - отдельной
+' кнопки не требуется.
+Public Sub PRIME_Orders_RefreshAvailability(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    Dim colAvail As Long, colCode As Long, colLoc As Long
+    colAvail = PRIME_ColIndex(headers, "В наличии сейчас")
+    colCode = PRIME_ColIndex(headers, "Код товара")
+    If colAvail < 0 Or colCode < 0 Then Exit Sub
+    Dim code As String
+    code = Trim(oSheet.getCellByPosition(colCode, row).getString())
+    If code = "" Or Not PRIME_ProductExists(code) Then Exit Sub
+    colLoc = PRIME_ColIndex(headers, "Место хранения")
+    Dim loc As String
+    loc = ""
+    If colLoc >= 0 Then loc = Trim(oSheet.getCellByPosition(colLoc, row).getString())
+    oSheet.getCellByPosition(colAvail, row).setValue(PRIME_LocationContourBalance(code, loc, SC_GENERAL))
+End Sub
+
 ' order_status_logic (recommendation §14/§38): пересчитывает "Статус" по остатку/датам.
 ' "Отменено" - единственный статус, который эта функция никогда не перезаписывает (ручное
 ' решение пользователя, аналогично do_not_overwrite_non_empty_user_fields).
 Public Sub PRIME_Orders_RecomputeStatus(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    PRIME_Orders_RefreshAvailability(oSheet, headers, row)
     Dim colStatus As Long
     colStatus = PRIME_ColIndex(headers, "Статус")
     If colStatus < 0 Then Exit Sub
@@ -267,6 +292,11 @@ Public Sub PRIME_Orders_ConductSelectedButton()
     PRIME_Orders_ConductRow(oSheet, row)
 End Sub
 
+' R09 (2.1.0): все строки с заполненным "Факт. количество" проводятся ОДНИМ RECEIPT-документом
+' (один DOC_ID/OP_ID/один store()) - раньше N готовых строк означали N отдельных документов и N
+' file store() (например, 126 строк одной поставки = 126 сохранений файла, без атомарности "весь
+' приход целиком или никак"). PRIME_PostReceiptLines и так строит партию/движение на КАЖДУЮ
+' строку плана - здесь просто перестаём вызывать PostDocument в цикле по одной строке.
 Public Sub PRIME_Orders_ConductAllReadyButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_ORDERS)
@@ -277,68 +307,82 @@ Public Sub PRIME_Orders_ConductAllReadyButton()
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
+    Dim plan As PrimeDocPlan
+    Dim rowForLine(999) As Long
+    Dim factQtyForLine(999) As Double
+    Dim newProductRowForLine(999) As Boolean
+    Dim batchKey As String
+    batchKey = ""
+    Dim commonOrderId As String
+    Dim orderIdsDiffer As Boolean
+    orderIdsDiffer = False
+
     Dim r As Long
     For r = 1 To lastRow
         If Trim(oSheet.getCellByPosition(colFact, r).getString()) <> "" Then
-            PRIME_Orders_ConductRow(oSheet, r)
+            Dim docLine As PrimeDocLine
+            Dim rowOrderId As String, rowDeliveryKey As String
+            If PRIME_Orders_BuildReceiptLine(oSheet, headers, r, docLine, rowOrderId, rowDeliveryKey) Then
+                If plan.LineCount = 0 Then
+                    PRIME_InitPlan(plan, DOC_RECEIPT, SH_ORDERS, "")
+                    commonOrderId = rowOrderId
+                ElseIf rowOrderId <> commonOrderId Then
+                    orderIdsDiffer = True
+                End If
+                batchKey = batchKey & rowDeliveryKey & ","
+                rowForLine(plan.LineCount) = r
+                factQtyForLine(plan.LineCount) = docLine.QtyInput
+                newProductRowForLine(plan.LineCount) = (docLine.ProductCode = "")
+                PRIME_PlanAddLine(plan, docLine)
+            End If
         End If
     Next r
+
+    If plan.LineCount = 0 Then
+        MsgBox "Нет строк с заполненным ""Факт. количество""."
+        Exit Sub
+    End If
+    plan.SourceKey = "BATCH:" & batchKey
+    ' DB_PRIME_DOCUMENTS.ORDER_ID - документ-уровневое поле; если батч охватывает НЕСКОЛЬКО
+    ' разных заказов сразу, честнее оставить его пустым, чем ошибочно приписать весь документ
+    ' одному из них - у КАЖДОЙ строки snapshot всё равно свой правильный ORDER_ID/ORDER_LINE_ID
+    ' (см. PRIME_04_Posting.PRIME_BuildOrderSnapshotRow - берёт его из самой строки "Заказы").
+    If Not orderIdsDiffer Then plan.OrderId = commonOrderId
+
+    Dim docId As String
+    docId = PRIME_PostDocument(plan)
+    If docId = "" Then
+        MsgBox "Проведение не выполнено: " & PRIME_LastPostError()
+        Exit Sub
+    End If
+
+    Dim i As Long
+    For i = 0 To plan.LineCount - 1
+        If newProductRowForLine(i) Then
+            oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), rowForLine(i)).setString(plan.Lines(i).ProductCode)
+        End If
+        PRIME_Orders_ApplyReceiptResult(oSheet, headers, rowForLine(i), factQtyForLine(i), docId)
+    Next i
+
+    MsgBox "Проведено строк: " & plan.LineCount & " (документ " & docId & ")"
 End Sub
 
-' Частичная поставка (partial_receipts): каждый клик - отдельный документ/партия, после успеха
-' очищается Факт.количество, обновляются Получено всего/Осталось получить.
+' Частичная поставка (partial_receipts): каждый клик по одной строке - отдельный документ/партия
+' (одна строка = один DocLine, PostDocument сам создаёт для неё ОДИН DOC_ID/OP_ID); после успеха
+' очищается "Факт. количество", обновляются "Получено всего"/"Осталось получить".
 Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_ORDERS)
 
-    Dim factStr As String
-    factStr = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Факт. количество"), row).getString())
-    If factStr = "" Or Not IsNumeric(factStr) Then
-        MsgBox "Строка " & (row + 1) & ": заполните ""Факт. количество"" перед проведением."
-        Exit Sub
-    End If
+    Dim docLine As PrimeDocLine
+    Dim orderId As String, deliveryKey As String
+    If Not PRIME_Orders_BuildReceiptLine(oSheet, headers, row, docLine, orderId, deliveryKey) Then Exit Sub
     Dim factQty As Double
-    factQty = CDbl(factStr)
-    If factQty <= 0 Then
-        MsgBox "Строка " & (row + 1) & ": количество должно быть больше нуля."
-        Exit Sub
-    End If
-
-    Dim orderId As String, lineId As String, state As String
-    orderId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_OrderID"), row).getString()
-    lineId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_LineID"), row).getString()
-    state = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_State"), row).getString()
-    Dim deliveryId As String
-    If Left(state, 4) = "DLV:" Then
-        deliveryId = state
-    Else
-        deliveryId = "DLV:" & Format(Now, "YYYYMMDDHHMMSS")
-    End If
-
-    Dim productCode As String
-    productCode = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).getString())
-    Dim productName As String
-    productName = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Полное наименование товара"), row).getString()
-    Dim unit As String
-    unit = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
-    Dim location As String
-    location = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место хранения"), row).getString()
-    Dim price As Double
-    On Error Resume Next
-    price = CDbl(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Цена"), row).getString())
-    On Error Goto 0
+    factQty = docLine.QtyInput
 
     Dim plan As PrimeDocPlan
-    PRIME_InitPlan(plan, DOC_RECEIPT, SH_ORDERS, orderId & "|" & lineId & "|" & deliveryId)
+    PRIME_InitPlan(plan, DOC_RECEIPT, SH_ORDERS, deliveryKey)
     plan.OrderId = orderId
-
-    Dim docLine As PrimeDocLine
-    docLine.ProductCode = productCode
-    docLine.ProductName = productName
-    docLine.QtyInput = factQty
-    docLine.UnitInput = unit
-    docLine.LocationTo = location
-    docLine.Price = price
     PRIME_PlanAddLine(plan, docLine)
 
     Dim docId As String
@@ -349,14 +393,65 @@ Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
         Exit Sub
     End If
 
-    ' Если код товара был пуст - подставляем сгенерированный ЕИ-код обратно в лист.
-    If productCode = "" Then
-        Dim createdCode As String
-        createdCode = plan.Lines(0).ProductCode
-        oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).setString(createdCode)
+    ' Если код товара был пуст - PRIME_PostDocument (ByRef plan) заполнил его сгенерированным
+    ' ЕИ-кодом в plan.Lines(0) - подставляем обратно в лист.
+    If plan.Lines(0).ProductCode <> "" And Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).getString()) = "" Then
+        oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).setString(plan.Lines(0).ProductCode)
     End If
 
-    ' Обновляем "Получено всего"/"Осталось получить", очищаем "Факт. количество" и pending state.
+    PRIME_Orders_ApplyReceiptResult(oSheet, headers, row, factQty, docId)
+    MsgBox "Проведено: " & docId
+End Sub
+
+' Читает строку "Заказы" и строит PrimeDocLine для RECEIPT - используется и одиночным
+' проведением (ConductRow), и батчем (ConductAllReadyButton), чтобы логика не расходилась.
+' Возвращает False (с MsgBox) для строк, которые не готовы к проведению - вызывающий обязан
+' пропустить такую строку, а не прерывать весь батч.
+Private Function PRIME_Orders_BuildReceiptLine(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, _
+        ByRef docLine As PrimeDocLine, ByRef orderId As String, ByRef deliveryKey As String) As Boolean
+    Dim factStr As String
+    factStr = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Факт. количество"), row).getString())
+    If factStr = "" Or Not IsNumeric(factStr) Then
+        MsgBox "Строка " & (row + 1) & ": заполните ""Факт. количество"" перед проведением."
+        PRIME_Orders_BuildReceiptLine = False
+        Exit Function
+    End If
+    Dim factQty As Double
+    factQty = CDbl(factStr)
+    If factQty <= 0 Then
+        MsgBox "Строка " & (row + 1) & ": количество должно быть больше нуля."
+        PRIME_Orders_BuildReceiptLine = False
+        Exit Function
+    End If
+
+    Dim lineId As String, state As String
+    orderId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_OrderID"), row).getString()
+    lineId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_LineID"), row).getString()
+    state = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_State"), row).getString()
+    Dim deliveryId As String
+    If Left(state, 4) = "DLV:" Then
+        deliveryId = state
+    Else
+        deliveryId = "DLV:" & Format(Now, "YYYYMMDDHHMMSS") & Int(Rnd * 9999) & "-" & row
+    End If
+    deliveryKey = orderId & "|" & lineId & "|" & deliveryId
+
+    docLine.ProductCode = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).getString())
+    docLine.ProductName = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Полное наименование товара"), row).getString()
+    docLine.QtyInput = factQty
+    docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
+    docLine.LocationTo = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место хранения"), row).getString()
+    docLine.Contour = SC_GENERAL
+    docLine.OrderLineId = lineId
+    On Error Resume Next
+    docLine.Price = CDbl(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Цена"), row).getString())
+    On Error Goto 0
+    PRIME_Orders_BuildReceiptLine = True
+End Function
+
+' Обновляет "Получено всего"/"Осталось получить"/"Последний приход"/"Дата последнего прихода",
+' очищает "Факт. количество" и pending state, пересчитывает статус и "В наличии сейчас" (R16/R17/R22).
+Private Sub PRIME_Orders_ApplyReceiptResult(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, ByVal factQty As Double, ByVal docId As String)
     Dim colReceived As Long, colRemaining As Long, colOrdered As Long
     colReceived = PRIME_ColIndex(headers, "Получено всего")
     colRemaining = PRIME_ColIndex(headers, "Осталось получить")
@@ -376,11 +471,15 @@ Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     If colReceived >= 0 Then oSheet.getCellByPosition(colReceived, row).setValue(receivedSoFar)
     If colRemaining >= 0 Then oSheet.getCellByPosition(colRemaining, row).setValue(orderedQty - receivedSoFar)
 
+    Dim colLastDoc As Long, colLastDate As Long
+    colLastDoc = PRIME_ColIndex(headers, "Последний приход")
+    colLastDate = PRIME_ColIndex(headers, "Дата последнего прихода")
+    If colLastDoc >= 0 Then oSheet.getCellByPosition(colLastDoc, row).setString(docId)
+    If colLastDate >= 0 Then oSheet.getCellByPosition(colLastDate, row).setString(Format(Now, "YYYY-MM-DD"))
+
     oSheet.getCellByPosition(PRIME_ColIndex(headers, "Факт. количество"), row).setString("")
     oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_State"), row).setString("")
     PRIME_Orders_RecomputeStatus(oSheet, headers, row)
-
-    MsgBox "Проведено: " & docId
 End Sub
 
 ' "Распознать по артикулам": для строк без "Код товара", но с заполненным "Код поставщика"/

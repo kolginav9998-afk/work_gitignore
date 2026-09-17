@@ -30,6 +30,7 @@ EXPECTED_HIDDEN_SHEETS = [
     "DB_PRIME_PRODUCTS", "DB_PRIME_ALIASES", "DB_PRIME_PRODUCT_UNITS",
     "DB_PRIME_DOCUMENTS", "DB_PRIME_DOC_LINES", "DB_PRIME_MOVEMENTS",
     "DB_PRIME_LOTS", "DB_PRIME_ALLOCATIONS", "DB_PRIME_RETURNS",
+    "DB_PRIME_RETURN_ALLOCATIONS",
     "DB_PRIME_ORDER_SNAPSHOT", "DB_PRIME_KITS", "DB_PRIME_KIT_LINES",
     "DB_PRIME_ACTS", "DB_PRIME_AUDIT",
 ]
@@ -42,13 +43,14 @@ EXPECTED_ORDERS_BUSINESS_COLUMNS = [
     "Цена", "Сумма", "Покупатель", "Категория", "Подкатегория",
     "Место хранения", "Статус", "Контроль", "Комментарий",
     "Ожидаемая дата", "Назначение / проект", "Получено всего", "Осталось получить",
+    "В наличии сейчас", "Последний приход", "Дата последнего прихода",
 ]
 
 PRIME_MODULES = [f"PRIME_{n:02d}_{name}" for n, name in [
     (0, "Config"), (1, "Runtime"), (2, "Store"), (3, "Catalog"), (4, "Posting"),
     (5, "Orders"), (6, "Issues"), (7, "Workflows"), (8, "ReturnsInventory"),
     (9, "StockSearch"), (10, "ActsReports"), (11, "Kits"), (12, "UI"),
-    (13, "Diagnostics"), (14, "MigrationInstaller"),
+    (13, "Diagnostics"), (14, "MigrationInstaller"), (15, "Transfers"), (16, "Journal"),
 ]]
 
 # legacy_removal (PRIME 2.0.1): должен точно совпадать с tools/build_ods.py's LEGACY_MODULES_TO_REMOVE -
@@ -191,14 +193,17 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             # header row, not the untouched legacy/decorative layout (2.0.0 defect - see
             # docs/KNOWN_ISSUES.md history). One representative check per affected sheet.
             EXPECTED_HEADER_SAMPLES = [
-                ("Выдачи", 0, ["№", "Код", "Наименование", "Назначение / проект"]),
-                ("Приход — Цех", 4, ["Дата", "Внутренний код", "Наименование"]),
-                ("Расход — Офис", 4, ["Дата", "Внутренний код", "Назначение / проект"]),
+                ("Выдачи", 0, ["№", "Код", "В наличии", "Кол-во", "После выдачи", "Назначение / проект"]),
+                ("Приход — Цех", 4, ["Дата", "Внутренний код", "Остаток деталей", "Кол-во", "Будет деталей"]),
+                ("Расход — Офис", 4, ["Дата", "Внутренний код", "Остаток офиса", "Будет в офисе", "Назначение / проект"]),
                 ("Возвраты", 4, ["Дата выдачи", "Код", "Осталось к возврату"]),
-                ("Инвентаризация", 4, ["Сессия", "Код", "Учёт", "Факт"]),
-                ("Остаток", 5, ["Код", "Наименование", "Место хранения", "Остаток"]),
+                ("Инвентаризация", 4, ["Сессия", "Код", "Контур", "Учёт", "Факт"]),
+                ("Наличие", 5, ["Код", "Наименование", "Контур", "Место хранения", "Остаток"]),
                 ("Остаток — Заказы", 4, ["ORDER_ID", "Код товара", "Текущий остаток партии"]),
                 ("База - Поиск", 5, ["Тип", "DOC_ID", "Код", "Подробности"]),
+                ("Перемещения", 0, ["Дата", "Внутренний код", "Контур — откуда", "Контур — куда"]),
+                ("Журнал", 0, ["DOC_ID", "OP_ID", "Тип", "Контур"]),
+                ("Комплекты", 0, ["KIT_ID", "Название", "PRODUCT_CODE"]),
             ]
             for sh_name, header_row, expected_cols in EXPECTED_HEADER_SAMPLES:
                 if not doc.Sheets.hasByName(sh_name):
@@ -215,7 +220,7 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
 
             # --- sheet events reference existing PRIME macros ---
             event_sheets = ["Заказы", "Выдачи", "Приход — Цех", "Расход — Цех",
-                             "Приход — Офис", "Расход — Офис", "Возвраты"]
+                             "Приход — Офис", "Расход — Офис", "Возвраты", "Перемещения"]
             for sh_name in event_sheets:
                 if not doc.Sheets.hasByName(sh_name):
                     continue
@@ -249,6 +254,28 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
                                 wmsdb_bound += 1
             check("no working buttons reference WMSDB modules", wmsdb_bound == 0, f"{wmsdb_bound} buttons still call WMSDB*")
             check("buttons bound to PRIME macros", prime_bound > 0, f"count={prime_bound}")
+
+            # --- R26 (2.1.0): 0 VISIBLE stub buttons. A button bound to PRIME_UI_NotImplementedStub
+            # or the Issues return-redirect stub must be hidden (EnableVisible=False) - see
+            # tools/build_ods.py's HIDE sentinel. A button bound to PRIME_Legacy_ArchiveStub is
+            # NOT counted against this (deliberate read-only-archive behavior, not an unfinished
+            # feature - see comment in build_ods.py next to the HIDE sentinel).
+            visible_disallowed_stubs = []
+            for si in range(doc.Sheets.Count):
+                sh = doc.Sheets.getByIndex(si)
+                forms = sh.DrawPage.Forms
+                for fi in range(forms.Count):
+                    form = forms.getByIndex(fi)
+                    for ci in range(form.Count):
+                        evs = form.getScriptEvents(ci)
+                        for e in evs:
+                            if ("PRIME_UI_NotImplementedStub" in e.ScriptCode
+                                    or "PRIME_Issues_ReturnRedirectStub" in e.ScriptCode):
+                                ctrl = form.getByIndex(ci)
+                                if getattr(ctrl, "EnableVisible", True):
+                                    visible_disallowed_stubs.append(f"{sh.Name}/{ctrl.Name}")
+            check("0 visible not-implemented/redirect stub buttons", len(visible_disallowed_stubs) == 0,
+                  f"still visible: {visible_disallowed_stubs}")
 
             # --- normal runtime has no required ODB dependency: WMS_DATA_PORTABLE.odb not embedded/opened ---
             meta_sheet_exists = doc.Sheets.hasByName("SYS_PRIME_META")

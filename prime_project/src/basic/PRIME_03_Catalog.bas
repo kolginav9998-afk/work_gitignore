@@ -236,10 +236,12 @@ End Function
 ' --- Местоположение с положительным остатком (для автоподстановки "Откуда" в Выдачах) ---
 ' location_rule: подставить, только если положительный остаток ровно в одном месте.
 ' Возвращает "" если мест 0 или >1 (multiple_locations => оставить пустым и показать подсказку).
+' Выдачи всегда общий склад (SC_GENERAL) - контур не выбирается пользователем на этом листе.
 Public Function PRIME_SingleLocationWithStock(ByVal productCode As String) As String
     Dim locations() As String
     Dim quantities() As Double
-    PRIME_StockByLocation(productCode, locations, quantities)
+    Dim contours() As String
+    PRIME_StockByLocation(productCode, SC_GENERAL, locations, quantities, contours)
 
     Dim result As String
     result = ""
@@ -263,68 +265,85 @@ Public Function PRIME_SingleLocationWithStock(ByVal productCode As String) As St
     End If
 End Function
 
-' Остаток товара по местам хранения, посчитанный из COMMITTED-движений (DB_PRIME_MOVEMENTS).
-' Заполняет параллельные массивы locations()/quantities() - Collection в StarBasic не отдаёт
-' свои ключи обратно, поэтому агрегация ведётся через явные массивы, а не через Collection.
+' Остаток товара по (месту хранения, контуру), посчитанный из COMMITTED-движений
+' (DB_PRIME_MOVEMENTS). Заполняет параллельные массивы locations()/quantities()/contours() -
+' Collection в StarBasic не отдаёт свои ключи обратно, поэтому агрегация ведётся через явные
+' массивы, а не через Collection. contourFilter="" - без фильтра по контуру (агрегирует по
+' месту независимо от контура; для "Наличие"/диагностики), непустое значение - строго один
+' контур (R02, используется большинством вызывающих - Инвентаризация, Выдачи).
 ' committed_only_stock (2.0.1): фильтр по PRIME_IsOpIdCommitted - см. комментарий у
 ' PRIME_04_Posting.PRIME_LotBalance, здесь та же независимая реализация суммирования по
 ' движениям, поэтому фильтр нужно было продублировать отдельно.
-Public Sub PRIME_StockByLocation(ByVal productCode As String, ByRef locations() As String, ByRef quantities() As Double)
+Public Sub PRIME_StockByLocation(ByVal productCode As String, ByVal contourFilter As String, ByRef locations() As String, ByRef quantities() As Double, ByRef contours() As String)
     Dim locCount As Long
     locCount = 0
 
     If Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then
         ReDim locations(-1)
         ReDim quantities(-1)
+        ReDim contours(-1)
         Exit Sub
     End If
 
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colProduct As Long, colLoc As Long, colQty As Long, colOpId As Long
+    Dim colProduct As Long, colLoc As Long, colQty As Long, colOpId As Long, colContour As Long
     colProduct = PRIME_ColIndex(headers, "PRODUCT_CODE")
     colLoc = PRIME_ColIndex(headers, "LOCATION")
     colQty = PRIME_ColIndex(headers, "QTY_BASE")
     colOpId = PRIME_ColIndex(headers, "OP_ID")
+    colContour = PRIME_ColIndex(headers, "STOCK_CONTOUR")
 
     Dim table As Variant
     table = PRIME_ReadTable(SH_DB_MOVEMENTS)
     If UBound(table) < 1 Then
         ReDim locations(-1)
         ReDim quantities(-1)
+        ReDim contours(-1)
         Exit Sub
     End If
 
     ReDim locations(UBound(table))
     ReDim quantities(UBound(table))
+    ReDim contours(UBound(table))
 
     Dim i As Long, j As Long, foundIdx As Long
     For i = 1 To UBound(table)
         If CStr(table(i)(colProduct)) = productCode And PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
+            Dim rowContour As String
+            rowContour = ""
+            If colContour >= 0 Then rowContour = CStr(table(i)(colContour))
+            If contourFilter <> "" And rowContour <> contourFilter Then GoTo ContinueLoop
             Dim loc As String
             loc = CStr(table(i)(colLoc))
+            Dim k As String
+            k = loc & "|" & rowContour
             foundIdx = -1
             For j = 0 To locCount - 1
-                If locations(j) = loc Then
+                If locations(j) & "|" & contours(j) = k Then
                     foundIdx = j
                     Exit For
                 End If
             Next j
             If foundIdx = -1 Then
                 locations(locCount) = loc
+                contours(locCount) = rowContour
                 quantities(locCount) = CDbl(table(i)(colQty))
                 locCount = locCount + 1
             Else
                 quantities(foundIdx) = quantities(foundIdx) + CDbl(table(i)(colQty))
             End If
         End If
+ContinueLoop:
     Next i
 
     If locCount = 0 Then
         ReDim locations(-1)
         ReDim quantities(-1)
+        ReDim contours(-1)
     Else
         ReDim Preserve locations(locCount - 1)
         ReDim Preserve quantities(locCount - 1)
+        ReDim Preserve contours(locCount - 1)
     End If
 End Sub

@@ -67,7 +67,31 @@ PRIME_MODULES = [
     "PRIME_12_UI",
     "PRIME_13_Diagnostics",
     "PRIME_14_MigrationInstaller",
+    "PRIME_15_Transfers",
+    "PRIME_16_Journal",
 ]
+
+# 2.1.0 (R25/R26): "Перемещения"/"Журнал" - совершенно новые листы без единого пре-существующего
+# form-контрола в шаблоне 1.4.1 (нечего перепривязывать - BUTTON_MAP работает только поверх уже
+# нарисованных кнопок), а у "Комплекты" в 2.0.0/2.0.1 не было привязано вообще ни одной кнопки
+# (только одна InputBox-функция, вызываемая исключительно через Сервис -> Макросы). Вместо того
+# чтобы оставить эти три листа без единой видимой кнопки (тот же класс проблемы, что и "0 visible
+# stubs", только наоборот - "0 visible buttons"), здесь программно создаются реальные
+# push-button контролы поверх декоративной шапки листа (строка 1, под заголовком/описанием) и
+# сразу привязываются к соответствующему PRIME-макросу - см. create_new_sheet_buttons().
+NEW_SHEET_BUTTONS = {
+    "Перемещения": [
+        ("Новое перемещение", "Standard.PRIME_15_Transfers.PRIME_Transfers_NewButton"),
+        ("Провести выбранное", "Standard.PRIME_15_Transfers.PRIME_Transfers_ConductSelectedButton"),
+        ("Провести все", "Standard.PRIME_15_Transfers.PRIME_Transfers_ConductAllButton"),
+    ],
+    "Журнал": [
+        ("Обновить", "Standard.PRIME_16_Journal.PRIME_Journal_RefreshButton"),
+    ],
+    "Комплекты": [
+        ("Добавить комплект в выдачу", "Standard.PRIME_11_Kits.PRIME_Kits_AddToIssuesButton"),
+    ],
+}
 
 # Листы с лёгким обработчиком PRIME_OnContentChanged_* (ARCHITECTURE §4): Заказы, Выдачи,
 # 4 активных цеховых/офисных листа, Возвраты. Ключ события в UNO - "OnChange".
@@ -79,12 +103,28 @@ SHEET_EVENT_HANDLERS = {
     "Приход — Офис": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Расход — Офис": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Возвраты": "Standard.PRIME_08_ReturnsInventory.PRIME_OnContentChanged_Returns",
+    "Перемещения": "Standard.PRIME_15_Transfers.PRIME_OnContentChanged_Transfers",
 }
 
-# Карта (лист, старое имя контрола) -> новый PRIME-макрос. Построена по фактической выгрузке
-# кнопок из шаблона (dump_all_buttons.py) - см. коммит с картой кнопок в PRIME_ARCHITECTURE
-# обсуждении. Всё, что не перечислено ниже, остаётся привязанным к старому WMS_*-макросу
-# (архивный код, см. NotImplementedStub для явных отказов там, где это важно проговорить).
+# Карта (лист, старое имя контрола) -> новый PRIME-макрос, либо сентинел HIDE.
+# Построена по фактической выгрузке кнопок из шаблона (dump_all_buttons.py) - см. коммит с
+# картой кнопок в PRIME_ARCHITECTURE обсуждении.
+#
+# 2.1.0 (R26, "0 visible stubs"): раньше нереализованные функции 1.4.1 привязывались к
+# PRIME_UI_NotImplementedStub - кнопка оставалась ВИДИМОЙ и кликабельной, только показывала
+# сообщение "не перенесено". Аудит внешней проверки справедливо указал, что 52 такие видимые
+# кнопки-заглушки (23 NotImplementedStub + 28 ArchiveStub на легаси-листах + 1 redirect) не
+# соответствуют требованию "0 dead buttons". Реальных новых фич под них в этом проходе не
+# добавлено (см. KNOWN_ISSUES - осознанно отложенные), поэтому вместо "видимая кнопка с
+# сообщением-заглушкой" теперь HIDE: EnableVisible=False - кнопка физически присутствует в
+# документе (истории/layout не ломаем), но не отображается и не кликабельна, то есть не
+# является "видимой заглушкой" ни по букве, ни по духу требования.
+# ArchiveStub на 4 легаси-архивных листах (Производство/Детали) - НЕ HIDE: это не "недоделанная
+# фича", а осознанно read-only архив истории (см. ARCHITECTURE §5) - сами эти листы уже
+# скрываются целиком, если в них нет исторических данных (PRIME_UI_ApplySheetVisibility), а
+# если данные есть, кнопка-подсказка "это архив, только для чтения" - корректное, честное
+# поведение защищённого read-only листа, а не незакрытый долг.
+HIDE = None
 STUB = "Standard.PRIME_12_UI.PRIME_UI_NotImplementedStub"
 ARCHIVE_STUB = "Standard.PRIME_12_UI.PRIME_Legacy_ArchiveStub"
 
@@ -95,17 +135,17 @@ BUTTON_MAP = {
     ("Инфо", "WMSC_STOCK"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
     ("Инфо", "WMSC_SEARCH"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
     ("Инфо", "WMSC_INCOMPLETE"): "Standard.PRIME_13_Diagnostics.PRIME_Diagnostics_RunButton",
-    ("Инфо", "WMSC_AUDIT"): STUB,
-    ("Инфо", "WMSC_ACTS"): STUB,
+    ("Инфо", "WMSC_AUDIT"): HIDE,
+    ("Инфо", "WMSC_ACTS"): HIDE,
     ("Инфо", "WMSC_ACTOPEN"): "Standard.PRIME_10_ActsReports.PRIME_Acts_OpenByDocIdButton",
     ("Инфо", "WMSC_UPDATE"): "Standard.PRIME_14_MigrationInstaller.PRIME_Migration_RunButton",
-    ("Инфо", "WMS_CLEAN_PRODUCT"): STUB,
-    ("Инфо", "WMS_CLEAN_ORDER"): STUB,
-    ("Инфо", "WMS_CLEAN_DOC"): STUB,
-    ("Инфо", "WMS_CLEAN_LOT"): STUB,
-    ("Инфо", "WMS_CLEAN_OPER"): STUB,
-    ("Инфо", "WMS_CLEAN_ALL"): STUB,
-    ("Инфо", "WMS_EXPORT_REPORT_DATA"): STUB,
+    ("Инфо", "WMS_CLEAN_PRODUCT"): HIDE,
+    ("Инфо", "WMS_CLEAN_ORDER"): HIDE,
+    ("Инфо", "WMS_CLEAN_DOC"): HIDE,
+    ("Инфо", "WMS_CLEAN_LOT"): HIDE,
+    ("Инфо", "WMS_CLEAN_OPER"): HIDE,
+    ("Инфо", "WMS_CLEAN_ALL"): HIDE,
+    ("Инфо", "WMS_EXPORT_REPORT_DATA"): HIDE,
     ("Инфо", "pa_control_111"): "Standard.PRIME_12_UI.PRIME_Nav_Dashboard",
     ("Инфо", "pa_control_112"): "Standard.PRIME_12_UI.PRIME_Nav_Report",
     # Заказы
@@ -114,35 +154,37 @@ BUTTON_MAP = {
     ("Заказы", "WMS_ORD_BTN_CONDUCT_POS"): "Standard.PRIME_05_Orders.PRIME_Orders_ConductSelectedButton",
     ("Заказы", "WMS_ORD_BTN_CONDUCT"): "Standard.PRIME_05_Orders.PRIME_Orders_ConductSelectedButton",
     ("Заказы", "WMS_ORD_BTN_CONDUCTALL"): "Standard.PRIME_05_Orders.PRIME_Orders_ConductAllReadyButton",
-    ("Заказы", "WMS_ORD_BTN_LOTUNITS"): STUB,
+    ("Заказы", "WMS_ORD_BTN_LOTUNITS"): HIDE,
     ("Заказы", "WMS_ORD_BTN_BULKFILL"): "Standard.PRIME_05_Orders.PRIME_Orders_FillAllByCodeButton",
     ("Заказы", "WMS_ORD_BTN_ARTICLE"): "Standard.PRIME_05_Orders.PRIME_Orders_ResolveByArticleButton",
-    ("Заказы", "WMS_ORD_BTN_UPD"): STUB,
+    ("Заказы", "WMS_ORD_BTN_UPD"): HIDE,
     ("Заказы", "WMS_ORD_BTN_DELDRAFT"): "Standard.PRIME_05_Orders.PRIME_Orders_DeleteDraftButton",
     # Выдачи
     ("Выдачи", "WMS_ISS_BTN_NEW"): "Standard.PRIME_06_Issues.PRIME_Issues_NewIssueButton",
     ("Выдачи", "WMS_ISS_BTN_CONDUCT"): "Standard.PRIME_06_Issues.PRIME_Issues_ConductSelectedButton",
     ("Выдачи", "WMS_ISS_BTN_CONDUCTALL"): "Standard.PRIME_06_Issues.PRIME_Issues_ConductAllButton",
-    ("Выдачи", "WMS_ISS_BTN_RETURN"): "Standard.PRIME_12_UI.PRIME_Issues_ReturnRedirectStub",
+    # single_return_mechanism: возврат теперь оформляется только на листе "Возвраты" -
+    # старая кнопка возврата на "Выдачи" скрыта, а не оставлена с redirect-сообщением (R26).
+    ("Выдачи", "WMS_ISS_BTN_RETURN"): HIDE,
     ("Выдачи", "WMS_ISS_BTN_LOOKUP"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
     ("Выдачи", "WMS_ISS_BTN_BULKFILL"): "Standard.PRIME_06_Issues.PRIME_Issues_FillAllByCodeButton",
-    # Остаток
-    ("Остаток", "WMS_STOCK_ALL"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
-    ("Остаток", "WMS_STOCK_OFFICE"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
-    ("Остаток", "WMS_STOCK_PROD"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
-    ("Остаток", "WMS_STOCK_PARTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
-    ("Остаток", "WMS_STOCK_NEG"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowNegativeButton",
-    ("Остаток", "WMS_STOCK_HISTORY"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
-    ("Остаток", "WMS_STOCK_LOTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowLotsByCodeButton",
-    ("Остаток", "WMS_STOCK_SEARCH"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
-    ("Остаток", "WMS_STOCK_DIAG"): "Standard.PRIME_13_Diagnostics.PRIME_Diagnostics_RunButton",
+    # Наличие (2.1.0, было "Остаток" - см. PRIME_Migration_RenameStockToNalichie)
+    ("Наличие", "WMS_STOCK_ALL"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
+    ("Наличие", "WMS_STOCK_OFFICE"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowContourOfficeButton",
+    ("Наличие", "WMS_STOCK_PROD"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowContourGeneralButton",
+    ("Наличие", "WMS_STOCK_PARTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowContourWorkshopButton",
+    ("Наличие", "WMS_STOCK_NEG"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowNegativeButton",
+    ("Наличие", "WMS_STOCK_HISTORY"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
+    ("Наличие", "WMS_STOCK_LOTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowLotsByCodeButton",
+    ("Наличие", "WMS_STOCK_SEARCH"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
+    ("Наличие", "WMS_STOCK_DIAG"): "Standard.PRIME_13_Diagnostics.PRIME_Diagnostics_RunButton",
     # База - Поиск
     ("База - Поиск", "WMS_S2_FIND"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
     ("База - Поиск", "WMS_S2_ALL"): "Standard.PRIME_09_StockSearch.PRIME_Search_ShowAllButton",
     ("База - Поиск", "WMS_S2_CLEAR"): "Standard.PRIME_09_StockSearch.PRIME_Search_ClearButton",
     # Справочники
-    ("Справочники", "WMS_REF_SAVE"): STUB,
-    ("Справочники", "WMS_REF_REFRESH"): STUB,
+    ("Справочники", "WMS_REF_SAVE"): HIDE,
+    ("Справочники", "WMS_REF_REFRESH"): HIDE,
     # Возвраты
     ("Возвраты", "WMS_RET_0"): "Standard.PRIME_08_ReturnsInventory.PRIME_Returns_RefreshButton",
     ("Возвраты", "WMS_RET_1"): "Standard.PRIME_08_ReturnsInventory.PRIME_Returns_ConductButton",
@@ -155,20 +197,21 @@ BUTTON_MAP = {
     ("Дашборд", "pa_control_95"): "Standard.PRIME_12_UI.PRIME_Nav_Orders",
     ("Дашборд", "pa_control_96"): "Standard.PRIME_12_UI.PRIME_Nav_Stock",
     ("Дашборд", "pa_control_97"): "Standard.PRIME_12_UI.PRIME_Nav_Report",
-    # Отчет — ввод
-    ("Отчет — ввод", "WMSRPT_BTN_0"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_1"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_2"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_3"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_4"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_5"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_6"): STUB,
+    # Отчет — ввод (быстрое автозаполнение из истории не реализовано в этом релизе - HIDE, не
+    # visible-stub; BTN_7/8/9 реализованы полноценно и остаются активными)
+    ("Отчет — ввод", "WMSRPT_BTN_0"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_1"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_2"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_3"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_4"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_5"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_6"): HIDE,
     ("Отчет — ввод", "WMSRPT_BTN_7"): "Standard.PRIME_10_ActsReports.PRIME_Report_RefreshFactsButton",
     ("Отчет — ввод", "WMSRPT_BTN_8"): "Standard.PRIME_10_ActsReports.PRIME_Report_BuildButton",
     ("Отчет — ввод", "WMSRPT_BTN_9"): "Standard.PRIME_10_ActsReports.PRIME_Report_SaveButton",
-    ("Отчет — ввод", "WMSRPT_BTN_10"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_11"): STUB,
-    ("Отчет — ввод", "WMSRPT_BTN_12"): STUB,
+    ("Отчет — ввод", "WMSRPT_BTN_10"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_11"): HIDE,
+    ("Отчет — ввод", "WMSRPT_BTN_12"): HIDE,
     # Отчет руководителю
     ("Отчет руководителю", "pa_control_108"): "Standard.PRIME_12_UI.PRIME_Nav_ReportInput",
     ("Отчет руководителю", "pa_control_109"): "Standard.PRIME_10_ActsReports.PRIME_Report_SaveButton",
@@ -179,8 +222,8 @@ BUTTON_MAP = {
 }
 
 # Активные workflow-листы получают единый обработчик; легаси-архивные (Производство/Детали)
-# получают явный "архив истории" стаб на каждой кнопке, а не тихо оставленный старый макрос,
-# который может попытаться обратиться к отсутствующему Firebird.
+# получают явный "архив истории" стаб на каждой кнопке (см. комментарий у HIDE выше - это
+# осознанное read-only поведение защищённого архивного листа, а не незакрытый долг).
 ACTIVE_WORKFLOW_SHEETS = ["Приход — Цех", "Расход — Цех", "Приход — Офис", "Расход — Офис"]
 LEGACY_WORKFLOW_SHEETS = ["Приход — Производство", "Расход — Производство", "Приход — Детали", "Расход — Детали"]
 WORKFLOW_BUTTON_NAMES = {
@@ -309,7 +352,7 @@ def bind_sheet_events(doc):
 
 def rebind_buttons(doc):
     rebound = 0
-    missing_sheets = set()
+    hidden = 0
     for sheet_idx in range(doc.Sheets.Count):
         sheet = doc.Sheets.getByIndex(sheet_idx)
         forms = sheet.DrawPage.Forms
@@ -321,6 +364,17 @@ def rebind_buttons(doc):
                 if key not in BUTTON_MAP:
                     continue
                 target = BUTTON_MAP[key]
+                if target is HIDE:
+                    # R26 (0 visible stubs): не реализованная в этом релизе функция скрывается,
+                    # а не оставляется видимой кнопкой с сообщением "не реализовано" - см.
+                    # комментарий у HIDE выше по файлу.
+                    try:
+                        form.revokeScriptEvent(ctrl_idx, "XActionListener", "actionPerformed", "")
+                    except Exception:
+                        pass
+                    ctrl.EnableVisible = False
+                    hidden += 1
+                    continue
                 desc = ScriptEventDescriptor()
                 desc.ListenerType = "XActionListener"
                 desc.EventMethod = "actionPerformed"
@@ -332,9 +386,62 @@ def rebind_buttons(doc):
                     pass
                 form.registerScriptEvent(ctrl_idx, desc)
                 rebound += 1
-    print(f"  rebound {rebound} buttons (of {len(BUTTON_MAP)} mapped)")
-    if rebound < len(BUTTON_MAP):
-        print(f"  NOTE: {len(BUTTON_MAP) - rebound} mapped (sheet, control) pairs were not found in the template")
+    mapped_actions = sum(1 for v in BUTTON_MAP.values() if v is not HIDE)
+    mapped_hides = sum(1 for v in BUTTON_MAP.values() if v is HIDE)
+    print(f"  rebound {rebound} buttons (of {mapped_actions} mapped actions), hid {hidden} (of {mapped_hides} mapped hides)")
+    if rebound < mapped_actions or hidden < mapped_hides:
+        print(f"  NOTE: {mapped_actions - rebound + mapped_hides - hidden} mapped (sheet, control) pairs were not found in the template")
+
+
+def create_new_sheet_buttons(doc):
+    """See NEW_SHEET_BUTTONS above: draws real push-button controls on sheets that have no
+    pre-existing template control to rebind (brand-new sheets, or a sheet that already existed
+    but never had a single bound button)."""
+    created = 0
+    for sheet_name, buttons in NEW_SHEET_BUTTONS.items():
+        if not doc.Sheets.hasByName(sheet_name):
+            print(f"  WARNING: sheet '{sheet_name}' not found, skipping button creation")
+            continue
+        sheet = doc.Sheets.getByName(sheet_name)
+        draw_page = sheet.DrawPage
+        forms = draw_page.Forms
+        if forms.Count == 0:
+            form = doc.createInstance("com.sun.star.form.component.Form")
+            form.Name = "PRIME_Form"
+            forms.insertByIndex(0, form)
+        else:
+            form = forms.getByIndex(0)
+
+        # Row 0, one button per ~35mm of width (1 mm = 100 1/100mm units), 8mm tall, just under
+        # the top of the sheet - same decorative-header row every business sheet already uses
+        # for its title/description band, so this does not collide with the real data header.
+        x_cursor = 200  # 2mm left margin
+        y_pos = 100      # 1mm from top
+        width = 3500     # 35mm
+        height = 800     # 8mm
+        gap = 200        # 2mm
+        for idx, (caption, macro) in enumerate(buttons):
+            ctrl_name = f"PRIME_BTN_{sheet_name}_{idx}"
+            model = doc.createInstance("com.sun.star.form.component.CommandButton")
+            model.Name = ctrl_name
+            model.Label = caption
+            form.insertByName(ctrl_name, model)
+            ctrl_idx = form.Count - 1
+
+            shape = doc.createInstance("com.sun.star.drawing.ControlShape")
+            shape.Control = model
+            shape.Size = uno.createUnoStruct("com.sun.star.awt.Size", width, height)
+            shape.Position = uno.createUnoStruct("com.sun.star.awt.Point", x_cursor, y_pos)
+            draw_page.add(shape)
+            desc = ScriptEventDescriptor()
+            desc.ListenerType = "XActionListener"
+            desc.EventMethod = "actionPerformed"
+            desc.ScriptType = "Script"
+            desc.ScriptCode = script_uri(macro)
+            form.registerScriptEvent(ctrl_idx, desc)
+            created += 1
+            x_cursor += width + gap
+    print(f"  created {created} new button controls on {len(NEW_SHEET_BUTTONS)} sheets")
 
 
 def build(template: Path, output: Path, port: int, profile_dir: Path, run_migration: bool):
@@ -358,14 +465,22 @@ def build(template: Path, output: Path, port: int, profile_dir: Path, run_migrat
         print("Injecting PRIME Basic modules ...")
         inject_basic_modules(doc)
 
-        # ВАЖНО: EnsureSchema и Migrate должны идти в ОТДЕЛЬНЫХ top-level invoke()-вызовах от
-        # внешнего скрипта, а не в одной цепочке вызовов внутри одного invoke(). Эмпирически
-        # подтверждено (см. историю отладки в git log): "EnsureSchema, затем сразу
-        # MigrateOrdersSheet в рамках ОДНОГО invoke()" молча ничего не мигрирует (без видимого
-        # исключения), а те же две операции, разнесённые по двум отдельным invoke(), работают
-        # штатно. Поэтому здесь два отдельных вызова, не один PRIME_Build_RunFullSetup.
-        print("Running PRIME_Install_EnsureAllBusinessSheetsSilent ...")
-        invoke_macro(doc, "Standard.PRIME_14_MigrationInstaller.PRIME_Install_EnsureAllBusinessSheetsSilent")
+        # ВАЖНО: EnsureSchema и любая последующая структурная операция (EnsureBusinessSheet,
+        # Migrate) должны идти в ОТДЕЛЬНЫХ top-level invoke()-вызовах от внешнего скрипта, а не в
+        # одной цепочке вызовов внутри одного invoke(). Эмпирически подтверждено (см. историю
+        # отладки, включая отдельную bisection-сессию 2.1.0): "EnsureSchema, затем сразу
+        # EnsureBusinessSheet(нового листа) или MigrateOrdersSheet в рамках ОДНОГО invoke()"
+        # молча ничего не создаёт/не мигрирует для этого второго шага (без видимого исключения),
+        # а те же операции, разнесённые по отдельным invoke(), работают штатно. Это тот самый
+        # механизм, из-за которого "Комплекты"/"Перемещения"/"Журнал" реально отсутствовали в
+        # ранее собранных .ods, хотя код, создающий их, формально вызывался. Поэтому здесь ТРИ
+        # отдельных вызова (EnsureSchema, затем EnsureAllBusinessSheetsOnly, затем Migrate/
+        # DisableLegacyEvents), а не один PRIME_Build_RunFullSetup.
+        print("Running PRIME_Install_EnsureSchema ...")
+        invoke_macro(doc, "Standard.PRIME_14_MigrationInstaller.PRIME_Install_EnsureSchema")
+
+        print("Running PRIME_Install_EnsureAllBusinessSheetsOnly (separate invoke) ...")
+        invoke_macro(doc, "Standard.PRIME_14_MigrationInstaller.PRIME_Install_EnsureAllBusinessSheetsOnly")
 
         if run_migration:
             print("Running PRIME_Build_MigrateSilent (separate invoke) ...")
@@ -382,6 +497,9 @@ def build(template: Path, output: Path, port: int, profile_dir: Path, run_migrat
 
         print("Rebinding buttons to PRIME macros ...")
         rebind_buttons(doc)
+
+        print("Creating buttons on new/previously-buttonless sheets ...")
+        create_new_sheet_buttons(doc)
 
         print("Removing legacy WMS_* modules from production ODS ...")
         remove_legacy_modules(doc)

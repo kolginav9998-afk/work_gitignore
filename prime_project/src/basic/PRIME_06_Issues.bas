@@ -6,15 +6,20 @@ Option Explicit
 Type PrimeDocLine
     ProductCode As String
     ProductName As String
+    IsNewProduct As Boolean
     QtyInput As Double
     UnitInput As String
     LocationFrom As String
     LocationTo As String
+    Contour As String
+    ContourFrom As String
+    ContourTo As String
     DestinationProject As String
     Recipient As String
     Comment As String
     Price As Double
     OriginalDocLineId As String
+    OrderLineId As String
     QtyBase As Double
     LotId As String
 End Type
@@ -25,7 +30,7 @@ Type PrimeDocPlan
     SourceSheet As String
     SourceKey As String
     OrderId As String
-    Lines(99) As PrimeDocLine
+    Lines(999) As PrimeDocLine
     LineCount As Long
 End Type
 
@@ -49,12 +54,18 @@ Public Sub PRIME_OnContentChanged_Issues(ByVal oRangeAddr As Variant)
     Dim colCode As Long
     colCode = PRIME_ColIndex(headers, "Код")
 
+    Dim colQty As Long
+    colQty = PRIME_ColIndex(headers, "Кол-во")
+
     Dim r As Long, c As Long
     For r = oRangeAddr.StartRow To oRangeAddr.EndRow
         If r >= 1 Then
             For c = oRangeAddr.StartColumn To oRangeAddr.EndColumn
                 If c = colCode Then
                     PRIME_Issues_AutofillByCode(oSheet, headers, r)
+                    PRIME_Issues_RefreshInlineStock(oSheet, headers, r)
+                ElseIf c = colQty Then
+                    PRIME_Issues_RefreshInlineStock(oSheet, headers, r)
                 End If
             Next c
         End If
@@ -62,6 +73,38 @@ Public Sub PRIME_OnContentChanged_Issues(ByVal oRangeAddr As Variant)
 
 CleanExit:
     PRIME_EventLeave()
+End Sub
+
+' R23 (2.1.0): "В наличии" -> "Кол-во" -> "После выдачи" - представление того же
+' COMMITTED-ledger, что и лист "Наличие" (контур всегда SC_GENERAL - Выдачи работают только со
+' складом), пересчитывается при вводе кода товара и количества.
+Private Sub PRIME_Issues_RefreshInlineStock(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    Dim colAvail As Long, colAfter As Long, colCode As Long, colFrom As Long, colQty As Long
+    colAvail = PRIME_ColIndex(headers, "В наличии")
+    colAfter = PRIME_ColIndex(headers, "После выдачи")
+    colCode = PRIME_ColIndex(headers, "Код")
+    colFrom = PRIME_ColIndex(headers, "Откуда")
+    colQty = PRIME_ColIndex(headers, "Кол-во")
+    If colAvail < 0 And colAfter < 0 Then Exit Sub
+
+    Dim code As String
+    code = Trim(oSheet.getCellByPosition(colCode, row).getString())
+    If code = "" Or Not PRIME_ProductExists(code) Then Exit Sub
+
+    Dim loc As String
+    loc = ""
+    If colFrom >= 0 Then loc = Trim(oSheet.getCellByPosition(colFrom, row).getString())
+    Dim available As Double
+    available = PRIME_LocationContourBalance(code, loc, SC_GENERAL)
+    If colAvail >= 0 Then oSheet.getCellByPosition(colAvail, row).setValue(available)
+
+    If colAfter >= 0 Then
+        Dim qtyStr As String
+        qtyStr = Trim(oSheet.getCellByPosition(colQty, row).getString())
+        If qtyStr <> "" And IsNumeric(qtyStr) Then
+            oSheet.getCellByPosition(colAfter, row).setValue(available - CDbl(qtyStr))
+        End If
+    End If
 End Sub
 
 ' live_code_lookup.Выдачи: Наименование, Ед.изм., Возвратный, Дата + location_rule для "Откуда".
@@ -136,6 +179,11 @@ Public Sub PRIME_Issues_ConductSelectedButton()
     PRIME_Issues_ConductRow(oSheet, row)
 End Sub
 
+' R09/R10 (2.1.0): все строки с заполненным кодом проводятся ОДНИМ ISSUE-документом (один
+' DOC_ID/OP_ID/один store()) - раньше N строк выдачи означали N отдельных документов. Строки
+' одного товара из одного места теперь резервируют остаток друг у друга внутри одного плана
+' (см. PRIME_04_Posting.PRIME_ValidateIssue) - две строки по 6 при остатке 10 отклоняются ВЕСЬ
+' документ, а не проходят обе независимо.
 Public Sub PRIME_Issues_ConductAllButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_ISSUES)
@@ -145,50 +193,53 @@ Public Sub PRIME_Issues_ConductAllButton()
     colCode = PRIME_ColIndex(headers, "Код")
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
+
+    Dim plan As PrimeDocPlan
+    Dim rowForLine(999) As Long
+    Dim batchKey As String
+    batchKey = ""
+
     Dim r As Long
     For r = 1 To lastRow
         If Trim(oSheet.getCellByPosition(colCode, r).getString()) <> "" Then
-            PRIME_Issues_ConductRow(oSheet, r)
+            Dim docLine As PrimeDocLine
+            Dim rowKey As String
+            If PRIME_Issues_BuildLine(oSheet, headers, r, docLine, rowKey) Then
+                If plan.LineCount = 0 Then PRIME_InitPlan(plan, DOC_ISSUE, SH_ISSUES, "")
+                batchKey = batchKey & rowKey & ","
+                rowForLine(plan.LineCount) = r
+                PRIME_PlanAddLine(plan, docLine)
+            End If
         End If
     Next r
+
+    If plan.LineCount = 0 Then Exit Sub
+    plan.SourceKey = "BATCH:" & batchKey
+
+    Dim docId As String
+    docId = PRIME_PostDocument(plan)
+    If docId = "" Then
+        MsgBox "Проведение не выполнено: " & PRIME_LastPostError()
+        Exit Sub
+    End If
+
+    Dim i As Long
+    For i = 0 To plan.LineCount - 1
+        PRIME_Issues_RefreshInlineStock(oSheet, headers, rowForLine(i))
+    Next i
+    MsgBox "Проведено строк выдачи: " & plan.LineCount & " (документ " & docId & ")"
 End Sub
 
 Public Sub PRIME_Issues_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_ISSUES)
 
+    Dim docLine As PrimeDocLine
     Dim draftId As String
-    draftId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_IssueState"), row).getString()
-    If draftId = "" Then
-        draftId = "ISS-" & Format(PRIME_SequenceNext("ISSUE_DRAFT_ID"), "00000000")
-        oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_IssueState"), row).setString(draftId)
-    End If
-
-    Dim code As String
-    code = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код"), row).getString())
-    If code = "" Then
-        MsgBox "Строка " & (row + 1) & ": не указан код товара."
-        Exit Sub
-    End If
-
-    Dim qtyStr As String
-    qtyStr = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кол-во"), row).getString())
-    If qtyStr = "" Or Not IsNumeric(qtyStr) Or CDbl(qtyStr) <= 0 Then
-        MsgBox "Строка " & (row + 1) & ": заполните корректное ""Кол-во""."
-        Exit Sub
-    End If
+    If Not PRIME_Issues_BuildLine(oSheet, headers, row, docLine, draftId) Then Exit Sub
 
     Dim plan As PrimeDocPlan
     PRIME_InitPlan(plan, DOC_ISSUE, SH_ISSUES, draftId)
-
-    Dim docLine As PrimeDocLine
-    docLine.ProductCode = code
-    docLine.QtyInput = CDbl(qtyStr)
-    docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
-    docLine.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Откуда"), row).getString()
-    docLine.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кто получил"), row).getString()
-    docLine.DestinationProject = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Назначение / проект"), row).getString()
-    docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Примечание"), row).getString()
     PRIME_PlanAddLine(plan, docLine)
 
     Dim docId As String
@@ -199,8 +250,47 @@ Public Sub PRIME_Issues_ConductRow(ByVal oSheet As Object, ByVal row As Long)
         Exit Sub
     End If
 
+    PRIME_Issues_RefreshInlineStock(oSheet, headers, row)
     MsgBox "Выдача проведена: " & docId
 End Sub
+
+' Читает строку "Выдачи" и строит PrimeDocLine - общий для одиночного и батч-проведения.
+' Возвращает False (с MsgBox) для неготовых строк - вызывающий обязан пропустить такую строку,
+' а не прерывать весь батч.
+Private Function PRIME_Issues_BuildLine(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, _
+        ByRef docLine As PrimeDocLine, ByRef draftId As String) As Boolean
+    draftId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_IssueState"), row).getString()
+    If draftId = "" Then
+        draftId = "ISS-" & Format(PRIME_SequenceNext("ISSUE_DRAFT_ID"), "00000000")
+        oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_IssueState"), row).setString(draftId)
+    End If
+
+    Dim code As String
+    code = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код"), row).getString())
+    If code = "" Then
+        MsgBox "Строка " & (row + 1) & ": не указан код товара."
+        PRIME_Issues_BuildLine = False
+        Exit Function
+    End If
+
+    Dim qtyStr As String
+    qtyStr = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кол-во"), row).getString())
+    If qtyStr = "" Or Not IsNumeric(qtyStr) Or CDbl(qtyStr) <= 0 Then
+        MsgBox "Строка " & (row + 1) & ": заполните корректное ""Кол-во""."
+        PRIME_Issues_BuildLine = False
+        Exit Function
+    End If
+
+    docLine.ProductCode = code
+    docLine.QtyInput = CDbl(qtyStr)
+    docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
+    docLine.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Откуда"), row).getString()
+    docLine.Contour = SC_GENERAL
+    docLine.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кто получил"), row).getString()
+    docLine.DestinationProject = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Назначение / проект"), row).getString()
+    docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Примечание"), row).getString()
+    PRIME_Issues_BuildLine = True
+End Function
 
 Public Sub PRIME_Issues_FillAllByCodeButton()
     Dim oSheet As Object

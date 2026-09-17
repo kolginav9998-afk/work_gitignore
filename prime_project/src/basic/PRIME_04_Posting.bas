@@ -2,22 +2,33 @@ Option Explicit
 
 ' PRIME_04_Posting
 ' Единственный posting engine (single_posting_engine=true). Все формы (Заказы, Выдачи,
-' цеховые/офисные листы, Возвраты, Инвентаризация) строят PrimeDocPlan и вызывают
+' цеховые/офисные листы, Возвраты, Перемещения, Инвентаризация) строят PrimeDocPlan и вызывают
 ' PRIME_PostDocument - сами НИКОГДА не пишут в DB_PRIME_* напрямую
 ' (ui_forms_must_not_write_movements_directly).
+'
+' PRIME 2.1.0: добавлены контуры остатка (STOCK_CONTOUR), lot-lineage для TRANSFER/ADJUSTMENT,
+' committed_only_everywhere для Returns/Allocations, allocation-level учёт частичных возвратов,
+' резервирование остатка между строками одного документа (ISSUE/TRANSFER), отложенное создание
+' нового товара (только после полной валидации плана), лимит строк документа поднят до 1000.
 
 Type PrimeDocLine
     ProductCode As String        ' если пусто - будет создан новый товар (только когда это осознанно разрешено вызывающим)
     ProductName As String        ' для создания карточки товара, если ProductCode пуст
+    IsNewProduct As Boolean      ' 2.1.0 (R11): True, если валидация решила, что это будет новый товар -
+                                 ' фактическое создание отложено до записи (после полной валидации плана)
     QtyInput As Double
     UnitInput As String
     LocationFrom As String
     LocationTo As String
+    Contour As String            ' 2.1.0: контур для RECEIPT/ISSUE/RETURN/ADJUSTMENT (см. PRIME_ContourForSheet)
+    ContourFrom As String        ' 2.1.0: используется только TRANSFER
+    ContourTo As String          ' 2.1.0: используется только TRANSFER
     DestinationProject As String ' "Назначение / проект" - обязательное поле, теряемое в 1.4.1
     Recipient As String
     Comment As String
     Price As Double
     OriginalDocLineId As String  ' для RETURN: ссылка на исходную строку выдачи
+    OrderLineId As String        ' 2.1.0: для RECEIPT из "Заказы" - ссылка на _PRIME_LineID (полный snapshot)
     QtyBase As Double            ' заполняется на этапе валидации (после конвертации единиц)
     LotId As String              ' заполняется на этапе валидации (для однопартийных операций) либо пусто (FIFO по нескольким партиям)
 End Type
@@ -28,7 +39,7 @@ Type PrimeDocPlan
     SourceSheet As String
     SourceKey As String
     OrderId As String
-    Lines(99) As PrimeDocLine
+    Lines(999) As PrimeDocLine
     LineCount As Long
 End Type
 
@@ -48,12 +59,13 @@ Public Sub PRIME_InitPlan(ByRef plan As PrimeDocPlan, ByVal docType As String, B
     plan.LineCount = 0
 End Sub
 
-' 99, не UBound(plan.Lines): StarBasic не компилирует UBound() на поле-массиве внутри Type -
-' граница держится в отдельной константе, синхронно с "Lines(99) As PrimeDocLine" в Type.
+' 999, не UBound(plan.Lines): StarBasic не компилирует UBound() на поле-массиве внутри Type -
+' граница держится в отдельной константе, синхронно с "Lines(999) As PrimeDocLine" в Type.
 Public Sub PRIME_PlanAddLine(ByRef plan As PrimeDocPlan, ByRef docLine As PrimeDocLine)
     If plan.LineCount > PRIME_DOC_PLAN_MAX_LINE_INDEX Then
-        Err.Raise 1010, "PRIME_Posting.PRIME_PlanAddLine", "Документ превышает лимит строк одной операции (100). Разбейте на несколько проведений."
+        Err.Raise 1010, "PRIME_Posting.PRIME_PlanAddLine", "Документ превышает лимит строк одной операции (1000). Разбейте на несколько проведений."
     End If
+    If docLine.Contour = "" Then docLine.Contour = SC_GENERAL
     plan.Lines(plan.LineCount) = docLine
     plan.LineCount = plan.LineCount + 1
 End Sub
@@ -98,6 +110,8 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     PRIME_AuditLog("", STAGE_VALIDATION_START, plan.SourceSheet, plan.SourceKey)
 
     ' 2. Проверка и построение полного плана в памяти (продукты/партии/FIFO/конвертации).
+    ' R11: эта функция и всё, что она вызывает, НЕ ИМЕЮТ ПРАВА писать в DB_PRIME_* - включая
+    ' создание нового товара (см. PRIME_ValidateReceipt - только помечает IsNewProduct).
     Dim errMsg As String
     If Not PRIME_ValidateAndExpandPlan(plan, errMsg) Then
         gLastPostError = errMsg
@@ -108,6 +122,17 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     End If
     PRIME_AuditLog("", STAGE_VALIDATION_OK, plan.SourceSheet, plan.SourceKey)
 
+    ' 2b. Реальное создание любых новых товаров (IsNewProduct=True) - ТОЛЬКО теперь, когда ВЕСЬ
+    ' план подтверждён валидным (R11), и ТОЛЬКО ЗДЕСЬ, а не глубже внутри PRIME_PostReceiptLines -
+    ' эмпирически подтверждено прямым вызовом функции (см. историю сессии): чем длиннее цепочка
+    ' ПОСЛЕДОВАТЕЛЬНЫХ структурных операций записи листа (insertNewByName/AppendRowsBatch) внутри
+    ' ОДНОГО вызова, тем выше эмпирический риск, что очередная такая операция в этой же цепочке
+    ' молча не выполнится (тот же класс ранее задокументированных проблем StarBasic/UNO
+    ' external-invoke, что и "EnsureSchema сразу за EnsureBusinessSheet в одном вызове"). Вызов
+    ' PRIME_CreateProduct сразу после валидации, ДО записи TX/Document/Lines, держит его
+    ' максимально РАНО в цепочке - там, где это эмпирически надёжно работало и в 2.0.1.
+    PRIME_CreateNewProductsIfAny(plan)
+
     ' 3. OP_ID / DOC_ID, запись PREPARED.
     opId = PRIME_NewOpId()
     docId = "DOC-" & Format(PRIME_SequenceNext("DOC_ID"), "00000000")
@@ -116,7 +141,7 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     PRIME_AuditLog(opId, STAGE_TX_PREPARED, plan.SourceSheet, docId)
 
     ' 4. Пакетная запись документа/строк/партий/движений - по типу документа.
-    PRIME_WriteDocumentHeader(docId, plan)
+    PRIME_WriteDocumentHeader(docId, opId, plan)
     PRIME_AuditLog(opId, STAGE_DOCS_WRITTEN, plan.SourceSheet, docId)
     PRIME_WriteDocLines(docId, plan)
     PRIME_AuditLog(opId, STAGE_LINES_WRITTEN, plan.SourceSheet, docId)
@@ -139,11 +164,11 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
 
     ' 5. COMMITTED - последний логический шаг перед UI/store.
     PRIME_UpdateTxState(opId, TX_COMMITTED, "")
-    PRIME_RegisterCommittedKey(plan.SourceKey, docId)
+    PRIME_RegisterCommittedKey(plan.SourceKey, docId, opId)
     committedKeyRegistered = True
     PRIME_AuditLog(opId, STAGE_TX_COMMITTED, plan.SourceSheet, docId)
 
-    ' 6. Один store() на весь документ.
+    ' 6. Один store() на весь документ (даже при 1000 строк - см. R09/R12).
     PRIME_AuditLog(opId, STAGE_STORE_START, plan.SourceSheet, docId)
     ThisComponent.store()
     PRIME_AuditLog(opId, STAGE_STORE_OK, plan.SourceSheet, docId)
@@ -161,12 +186,13 @@ PostFailed:
     If txWritten Then
         PRIME_TryMarkTxFailed(opId, errDesc)
     End If
-    ' transaction_cache_store_consistency (2.0.1): если COMMITTED успели выставить и
-    ' зарегистрировать SOURCE_KEY (например, ThisComponent.store() провалился ПОСЛЕ шага 5),
-    ' откатываем кэш вместе с TX - иначе повторная попытка того же SOURCE_KEY получит
-    ' "уже проведено" вместо повторной попытки, хотя TX только что стал FAILED.
+    ' transaction_cache_store_consistency (2.0.1/2.1.0): если COMMITTED успели выставить и
+    ' зарегистрировать SOURCE_KEY/OP_ID/DOC_ID (например, ThisComponent.store() провалился
+    ' ПОСЛЕ шага 5), откатываем кэши вместе с TX - иначе повторная попытка того же SOURCE_KEY
+    ' получит "уже проведено", а Returns/Documents/Lines этой же операции продолжат ошибочно
+    ' считаться COMMITTED.
     If committedKeyRegistered Then
-        PRIME_UnregisterCommittedKey(plan.SourceKey)
+        PRIME_UnregisterCommittedKey(plan.SourceKey, docId, opId)
     End If
     PRIME_AuditLog(opId, STAGE_ERROR, plan.SourceSheet, errDesc)
     PRIME_Leave()
@@ -244,22 +270,25 @@ Private Function PRIME_ValidateAdjustment(ByRef plan As PrimeDocPlan, ByRef errM
     PRIME_ValidateAdjustment = True
 End Function
 
+' R11 (2.1.0): для нового товара (ProductCode="") НЕ вызываем PRIME_CreateProduct здесь -
+' валидация обязана быть чистой (без записи в DB_PRIME_*). Коэффициент пересчёта для нового
+' товара тривиален (введённая единица становится его базовой, фактор=1) - его можно посчитать
+' без существующей строки товара. Фактическое создание карточки товара откладывается до
+' PRIME_PostReceiptLines (после того, как весь план целиком подтверждён валидным).
 Private Function PRIME_ValidateReceipt(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        If plan.Lines(i).ProductCode = "" Then
-            ' Новый товар - forbidden запрещает создавать код, когда код УЖЕ указан; здесь код
-            ' сознательно пуст, значит создание нового кода корректно.
-            plan.Lines(i).ProductCode = PRIME_CreateProduct(plan.Lines(i).ProductName, plan.Lines(i).UnitInput, _
-                plan.Lines(i).LocationTo, "", "", False, "")
-        End If
-
         Dim baseQty As Variant
-        baseQty = PRIME_ConvertQtyToBase(plan.Lines(i).ProductCode, plan.Lines(i).UnitInput, plan.Lines(i).QtyInput)
-        If IsEmpty(baseQty) Then
-            errMsg = "Строка " & (i + 1) & ": нет коэффициента пересчёта для единицы """ & plan.Lines(i).UnitInput & """."
-            PRIME_ValidateReceipt = False
-            Exit Function
+        If plan.Lines(i).ProductCode = "" Then
+            plan.Lines(i).IsNewProduct = True
+            baseQty = PRIME_RoundQty(plan.Lines(i).QtyInput) ' новый товар: введённая единица = базовая, фактор 1
+        Else
+            baseQty = PRIME_ConvertQtyToBase(plan.Lines(i).ProductCode, plan.Lines(i).UnitInput, plan.Lines(i).QtyInput)
+            If IsEmpty(baseQty) Then
+                errMsg = "Строка " & (i + 1) & ": нет коэффициента пересчёта для единицы """ & plan.Lines(i).UnitInput & """."
+                PRIME_ValidateReceipt = False
+                Exit Function
+            End If
         End If
         plan.Lines(i).QtyBase = CDbl(baseQty)
         plan.Lines(i).LotId = "LOT-" ' финальный номер присваивается на этапе записи (PRIME_PostReceiptLines)
@@ -267,7 +296,14 @@ Private Function PRIME_ValidateReceipt(ByRef plan As PrimeDocPlan, ByRef errMsg 
     PRIME_ValidateReceipt = True
 End Function
 
+' R10 (2.1.0): резервирование остатка между строками одного документа - если строка 1 уже
+' "списала" часть остатка (product|location|contour) в памяти плана, строка 2 того же ключа
+' обязана проверяться против УЖЕ УМЕНЬШЕННОГО остатка, иначе обе строки могут независимо
+' пройти проверку против одного и того же физического остатка и в сумме увести его в минус.
+' R02: доступность считается СТРОГО по месту+контуру (PRIME_FifoLotsForProduct), а не по
+' общему остатку товара по всем местам/контурам сразу.
 Private Function PRIME_ValidateIssue(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
+    Dim reserved As New Collection
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         Dim baseQty As Variant
@@ -279,18 +315,35 @@ Private Function PRIME_ValidateIssue(ByRef plan As PrimeDocPlan, ByRef errMsg As
         End If
         plan.Lines(i).QtyBase = CDbl(baseQty)
 
-        ' Проверка достаточности остатка по FIFO (без физической записи) - shortage_behavior=Reject entire document.
+        Dim key As String
+        key = plan.Lines(i).ProductCode & "|" & plan.Lines(i).LocationFrom & "|" & plan.Lines(i).Contour
+
         Dim available As Double
-        available = PRIME_TotalLotBalance(plan.Lines(i).ProductCode)
-        If available < plan.Lines(i).QtyBase Then
-            errMsg = "Строка " & (i + 1) & ": недостаточно остатка (доступно " & available & ", требуется " & plan.Lines(i).QtyBase & "). Документ не проведён целиком."
+        available = PRIME_LocationContourBalance(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).Contour)
+
+        Dim alreadyReservedInPlan As Variant
+        If Not PRIME_CollectionTryGet(reserved, key, alreadyReservedInPlan) Then alreadyReservedInPlan = 0#
+
+        Dim remaining As Double
+        remaining = available - CDbl(alreadyReservedInPlan)
+        If remaining < plan.Lines(i).QtyBase - 0.0000005 Then
+            errMsg = "Строка " & (i + 1) & ": недостаточно остатка на месте """ & plan.Lines(i).LocationFrom & _
+                """ (" & PRIME_ContourDisplayName(plan.Lines(i).Contour) & "): доступно " & remaining & _
+                ", требуется " & plan.Lines(i).QtyBase & ". Документ не проведён целиком."
             PRIME_ValidateIssue = False
             Exit Function
         End If
+
+        On Error Resume Next
+        reserved.Remove(key)
+        On Error Goto 0
+        reserved.Add(CDbl(alreadyReservedInPlan) + plan.Lines(i).QtyBase, key)
     Next i
     PRIME_ValidateIssue = True
 End Function
 
+' R07/R08 (2.1.0): issuedQty/returnedQty теперь считаются только по COMMITTED документам/
+' возвратам (см. PRIME_DocLineQtyBase/PRIME_AlreadyReturnedQtyBase ниже).
 Private Function PRIME_ValidateReturn(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
     Dim i As Long
     For i = 0 To plan.LineCount - 1
@@ -316,7 +369,11 @@ Private Function PRIME_ValidateReturn(ByRef plan As PrimeDocPlan, ByRef errMsg A
     PRIME_ValidateReturn = True
 End Function
 
+' R02/R05/R10 (2.1.0): доступность на "Откуда" считается строго по месту+контуру, с
+' резервированием между строками одного документа (как в Issue) - несколько строк перемещения
+' одного товара с одного и того же места не могут в сумме увести остаток там в минус.
 Private Function PRIME_ValidateTransfer(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
+    Dim reserved As New Collection
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         Dim baseQty As Variant
@@ -328,28 +385,53 @@ Private Function PRIME_ValidateTransfer(ByRef plan As PrimeDocPlan, ByRef errMsg
         End If
         plan.Lines(i).QtyBase = CDbl(baseQty)
 
-        Dim locations() As String
-        Dim quantities() As Double
-        PRIME_StockByLocation(plan.Lines(i).ProductCode, locations, quantities)
-        Dim avail As Double
-        avail = 0
-        Dim j As Long
-        If UBound(locations) >= LBound(locations) Then
-            For j = LBound(locations) To UBound(locations)
-                If locations(j) = plan.Lines(i).LocationFrom Then avail = quantities(j)
-            Next j
-        End If
-        If avail < plan.Lines(i).QtyBase Then
-            errMsg = "Строка " & (i + 1) & ": на месте """ & plan.Lines(i).LocationFrom & """ недостаточно остатка для перемещения."
+        If plan.Lines(i).ContourFrom = plan.Lines(i).ContourTo And plan.Lines(i).LocationFrom = plan.Lines(i).LocationTo Then
+            errMsg = "Строка " & (i + 1) & ": место и контур назначения совпадают с исходными - перемещение не имеет смысла."
             PRIME_ValidateTransfer = False
             Exit Function
         End If
+
+        Dim key As String
+        key = plan.Lines(i).ProductCode & "|" & plan.Lines(i).LocationFrom & "|" & plan.Lines(i).ContourFrom
+
+        Dim available As Double
+        available = PRIME_LocationContourBalance(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).ContourFrom)
+
+        Dim alreadyReservedInPlan As Variant
+        If Not PRIME_CollectionTryGet(reserved, key, alreadyReservedInPlan) Then alreadyReservedInPlan = 0#
+
+        Dim remaining As Double
+        remaining = available - CDbl(alreadyReservedInPlan)
+        If remaining < plan.Lines(i).QtyBase - 0.0000005 Then
+            errMsg = "Строка " & (i + 1) & ": на месте """ & plan.Lines(i).LocationFrom & """ (" & _
+                PRIME_ContourDisplayName(plan.Lines(i).ContourFrom) & ") недостаточно остатка для перемещения (доступно " & remaining & ")."
+            PRIME_ValidateTransfer = False
+            Exit Function
+        End If
+
+        On Error Resume Next
+        reserved.Remove(key)
+        On Error Goto 0
+        reserved.Add(CDbl(alreadyReservedInPlan) + plan.Lines(i).QtyBase, key)
     Next i
     PRIME_ValidateTransfer = True
 End Function
 
+' R11: единственное место, вызывающее PRIME_CreateProduct на пути проведения - только после
+' успешной PRIME_ValidateAndExpandPlan (весь план подтверждён валидным) и до любой другой
+' структурной записи (см. комментарий в PRIME_PostDocument, шаг 2b).
+Private Sub PRIME_CreateNewProductsIfAny(ByRef plan As PrimeDocPlan)
+    Dim i As Long
+    For i = 0 To plan.LineCount - 1
+        If plan.Lines(i).IsNewProduct Then
+            plan.Lines(i).ProductCode = PRIME_CreateProduct(plan.Lines(i).ProductName, plan.Lines(i).UnitInput, _
+                plan.Lines(i).LocationTo, "", "", False, "")
+        End If
+    Next i
+End Sub
+
 ' === Запись шапки/строк документа ============================================================
-Private Sub PRIME_WriteDocumentHeader(ByVal docId As String, ByRef plan As PrimeDocPlan)
+Private Sub PRIME_WriteDocumentHeader(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_DB_DOCUMENTS)
     Dim row(UBound(headers)) As Variant
@@ -360,6 +442,9 @@ Private Sub PRIME_WriteDocumentHeader(ByVal docId As String, ByRef plan As Prime
     row(PRIME_ColIndex(headers, "SOURCE_KEY")) = plan.SourceKey
     row(PRIME_ColIndex(headers, "ORDER_ID")) = plan.OrderId
     row(PRIME_ColIndex(headers, "STATUS")) = "PROVEDENO"
+    Dim colOpId As Long
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
+    If colOpId >= 0 Then row(colOpId) = opId
 
     Dim rows(0) As Variant
     rows(0) = row
@@ -395,13 +480,16 @@ Private Sub PRIME_WriteDocLines(ByVal docId As String, ByRef plan As PrimeDocPla
 End Sub
 
 ' Буфер сгенерированных DOC_LINE_ID на время одного PostDocument (не персистентно, только рантайм).
-Private gLineIdBuffer(99) As String
+Private gLineIdBuffer(999) As String
 
 Private Function PRIME_LineIdFor(ByVal idx As Long) As String
     PRIME_LineIdFor = gLineIdBuffer(idx)
 End Function
 
 ' === RECEIPT: создаёт партию на каждую строку и одно движение прихода =======================
+' R11: здесь, а не в валидации, создаётся карточка нового товара (IsNewProduct=True) - к этому
+' моменту ВЕСЬ план уже прошёл полную валидацию (PRIME_ValidateAndExpandPlan вернула True),
+' поэтому нет риска "наполовину созданного" товара из-за ошибки в ДРУГОЙ строке того же плана.
 Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim lotHeaders As Variant
     lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
@@ -413,7 +501,11 @@ Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, 
 
     Dim snapHeaders As Variant
     Dim hasSnapshot As Boolean
-    hasSnapshot = PRIME_SheetExists(SH_DB_ORDER_SNAPSHOT) And plan.OrderId <> ""
+    ' SourceSheet, а не plan.OrderId<>"" - в батче "Провести все готовые" (несколько заказов
+    ' сразу) документ-уровневый plan.OrderId может быть пуст (строки принадлежат РАЗНЫМ заказам,
+    ' см. PRIME_05_Orders.PRIME_Orders_ConductAllReadyButton), но каждая СТРОКА всё равно несёт
+    ' свой OrderLineId и обязана попасть в snapshot.
+    hasSnapshot = PRIME_SheetExists(SH_DB_ORDER_SNAPSHOT) And plan.SourceSheet = SH_ORDERS
     Dim snapRows() As Variant
     If hasSnapshot Then
         snapHeaders = PRIME_HeaderMap(SH_DB_ORDER_SNAPSHOT)
@@ -422,6 +514,10 @@ Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, 
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
+        ' R11: любой IsNewProduct=True уже разрешён в PRIME_PostDocument ДО этого места (см.
+        ' PRIME_CreateNewProductsIfAny, вызывается сразу после успешной валидации, ДО TX/
+        ' Document/Lines - см. её комментарий про эмпирически найденный предел на число подряд
+        ' идущих структурных операций внутри одного invoke()) - здесь ProductCode уже заполнен.
         Dim lotId As String
         lotId = "LOT-" & Format(PRIME_SequenceNext("LOT_ID"), "00000000")
         plan.Lines(i).LotId = lotId
@@ -437,10 +533,13 @@ Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, 
         lotRow(PRIME_ColIndex(lotHeaders, "BASE_UNIT")) = PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT")
         lotRow(PRIME_ColIndex(lotHeaders, "ORIGIN")) = plan.SourceSheet
         lotRow(PRIME_ColIndex(lotHeaders, "ORDER_ID")) = plan.OrderId
+        Dim colContour As Long
+        colContour = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
+        If colContour >= 0 Then lotRow(colContour) = plan.Lines(i).Contour
         lotRows(i) = lotRow
 
         moveRows(i) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-            lotId, plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId)
+            lotId, plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
 
         If hasSnapshot Then
             snapRows(i) = PRIME_BuildOrderSnapshotRow(snapHeaders, plan, i, docId, lotId)
@@ -453,19 +552,98 @@ Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, 
     If hasSnapshot Then PRIME_AppendRowsBatch(SH_DB_ORDER_SNAPSHOT, snapRows)
 End Sub
 
+' R13 (2.1.0): полный immutable snapshot - копирует ВСЕ значимые реквизиты заказа/поставки из
+' текущей строки листа "Заказы" (найденной по OrderLineId), а не только количество/партию, как
+' раньше. Источник правды на момент commit - сама строка "Заказы"; после commit её можно менять
+' (новая цена/поставщик следующей поставки), а снимок этой конкретной поставки не изменится.
 Private Function PRIME_BuildOrderSnapshotRow(ByVal headers As Variant, ByRef plan As PrimeDocPlan, ByVal idx As Long, ByVal docId As String, ByVal lotId As String) As Variant
     Dim row(UBound(headers)) As Variant
+    Dim orderRow As Variant
+    orderRow = PRIME_Orders_RowByLineId(plan.Lines(idx).OrderLineId)
+
     Dim c As Long
-    c = PRIME_ColIndex(headers, "ORDER_ID") : If c >= 0 Then row(c) = plan.OrderId
+    Dim lineOrderId As String
+    lineOrderId = plan.OrderId
+    If Not IsEmpty(orderRow) Then
+        Dim oHeadersForId As Variant
+        oHeadersForId = PRIME_HeaderMap(SH_ORDERS)
+        Dim idCol As Long
+        idCol = PRIME_ColIndex(oHeadersForId, "_PRIME_OrderID")
+        If idCol >= 0 Then lineOrderId = CStr(orderRow(idCol))
+    End If
+    c = PRIME_ColIndex(headers, "ORDER_ID") : If c >= 0 Then row(c) = lineOrderId
+    c = PRIME_ColIndex(headers, "ORDER_LINE_ID") : If c >= 0 Then row(c) = plan.Lines(idx).OrderLineId
     c = PRIME_ColIndex(headers, "RECEIPT_DOC_ID") : If c >= 0 Then row(c) = docId
+    c = PRIME_ColIndex(headers, "RECEIPT_LINE_ID") : If c >= 0 Then row(c) = PRIME_LineIdFor(idx)
     c = PRIME_ColIndex(headers, "LOT_ID") : If c >= 0 Then row(c) = lotId
-    c = PRIME_ColIndex(headers, "DELIVERY_QTY") : If c >= 0 Then row(c) = plan.Lines(idx).QtyBase
     c = PRIME_ColIndex(headers, "PRODUCT_CODE") : If c >= 0 Then row(c) = plan.Lines(idx).ProductCode
-    c = PRIME_ColIndex(headers, "DOC_DATE") : If c >= 0 Then row(c) = plan.DocDate
+    c = PRIME_ColIndex(headers, "RECEIPT_DATE") : If c >= 0 Then row(c) = plan.DocDate
+    c = PRIME_ColIndex(headers, "RECEIVED_QTY") : If c >= 0 Then row(c) = plan.Lines(idx).QtyBase
+    c = PRIME_ColIndex(headers, "UNIT") : If c >= 0 Then row(c) = plan.Lines(idx).UnitInput
+    c = PRIME_ColIndex(headers, "PRICE") : If c >= 0 Then row(c) = plan.Lines(idx).Price
+    c = PRIME_ColIndex(headers, "AMOUNT") : If c >= 0 Then row(c) = plan.Lines(idx).Price * plan.Lines(idx).QtyInput
+    c = PRIME_ColIndex(headers, "LOCATION") : If c >= 0 Then row(c) = plan.Lines(idx).LocationTo
+    c = PRIME_ColIndex(headers, "STOCK_CONTOUR") : If c >= 0 Then row(c) = plan.Lines(idx).Contour
+    c = PRIME_ColIndex(headers, "DESTINATION_PROJECT") : If c >= 0 Then row(c) = plan.Lines(idx).DestinationProject
+    c = PRIME_ColIndex(headers, "COMMENT") : If c >= 0 Then row(c) = plan.Lines(idx).Comment
+
+    If Not IsEmpty(orderRow) Then
+        Dim oHeaders As Variant
+        oHeaders = PRIME_HeaderMap(SH_ORDERS)
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "PRODUCT_NAME", "Полное наименование товара"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "SUPPLIER_OR_PLATFORM", "От кого / площадка"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "SELLER", "Продавец"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "SUPPLIER_CODE", "Код поставщика"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "SUPPLIER_ARTICLE", "Артикул поставщика"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "INVOICE_NUMBER", "Номер счета"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "DOCUMENT_NUMBER", "№ документа"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "ORDER_DATE", "Дата заказа"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "EXPECTED_DATE", "Ожидаемая дата"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "DOCUMENT_DATE", "Дата документа"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "ORDERED_QTY", "Количество"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "BUYER", "Покупатель"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "CATEGORY", "Категория"
+        PRIME_CopyOrderField row, headers, orderRow, oHeaders, "SUBCATEGORY", "Подкатегория"
+    End If
+
     PRIME_BuildOrderSnapshotRow = row
 End Function
 
-' === ISSUE: FIFO-разбиение по партиям, allocations, движения с отрицательным количеством =====
+Private Sub PRIME_CopyOrderField(ByRef targetRow As Variant, ByVal targetHeaders As Variant, ByVal sourceRow As Variant, _
+        ByVal sourceHeaders As Variant, ByVal targetColName As String, ByVal sourceColName As String)
+    Dim tc As Long, sc As Long
+    tc = PRIME_ColIndex(targetHeaders, targetColName)
+    sc = PRIME_ColIndex(sourceHeaders, sourceColName)
+    If tc >= 0 And sc >= 0 Then targetRow(tc) = sourceRow(sc)
+End Sub
+
+' Линейный поиск строки "Заказы" по _PRIME_LineID - таблица заказов умеренного размера
+' (та же оценка объёма, что и для DB_PRIME_PRODUCTS/ALIASES, см. PRIME_03_Catalog).
+Private Function PRIME_Orders_RowByLineId(ByVal orderLineId As String) As Variant
+    If orderLineId = "" Or Not PRIME_SheetExists(SH_ORDERS) Then
+        PRIME_Orders_RowByLineId = Empty
+        Exit Function
+    End If
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_ORDERS)
+    Dim colLineId As Long
+    colLineId = PRIME_ColIndex(headers, "_PRIME_LineID")
+    If colLineId < 0 Then
+        PRIME_Orders_RowByLineId = Empty
+        Exit Function
+    End If
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_ORDERS)
+    Dim idx As Long
+    idx = PRIME_FindRowByKey(table, colLineId, orderLineId)
+    If idx = -1 Then
+        PRIME_Orders_RowByLineId = Empty
+    Else
+        PRIME_Orders_RowByLineId = table(idx)
+    End If
+End Function
+
+' === ISSUE: FIFO-разбиение по партиям (строго место+контур), allocations, отрицательные движения ==
 Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim allocHeaders As Variant
     allocHeaders = PRIME_HeaderMap(SH_DB_ALLOCATIONS)
@@ -476,14 +654,14 @@ Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, By
     Dim moveRowsBuf() As Variant
     Dim allocCount As Long, moveCount As Long
     allocCount = 0 : moveCount = 0
-    ReDim allocRowsBuf(200)
-    ReDim moveRowsBuf(200)
+    ReDim allocRowsBuf(4000)
+    ReDim moveRowsBuf(4000)
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         Dim lots() As String
         Dim balances() As Double
-        PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, lots, balances)
+        PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).Contour, lots, balances)
 
         Dim remaining As Double
         remaining = plan.Lines(i).QtyBase
@@ -495,11 +673,13 @@ Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, By
                 take = remaining
                 If balances(j) < take Then take = balances(j)
 
+                If allocCount > UBound(allocRowsBuf) Then ReDim Preserve allocRowsBuf(UBound(allocRowsBuf) + 4000)
                 allocRowsBuf(allocCount) = PRIME_BuildAllocationRow(allocHeaders, PRIME_LineIdFor(i), lots(j), take)
                 allocCount = allocCount + 1
 
+                If moveCount > UBound(moveRowsBuf) Then ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
                 moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                    lots(j), -take, plan.Lines(i).LocationFrom, plan.DocDate, opId)
+                    lots(j), -take, plan.Lines(i).LocationFrom, plan.DocDate, opId, plan.Lines(i).Contour)
                 moveCount = moveCount + 1
 
                 remaining = remaining - take
@@ -533,21 +713,36 @@ Private Function PRIME_BuildAllocationRow(ByVal headers As Variant, ByVal docLin
     PRIME_BuildAllocationRow = row
 End Function
 
-' === RETURN: возврат симметричен FIFO-списанию исходной выдачи (FIFO по allocations) =========
+' === RETURN: возврат симметричен FIFO-списанию исходной выдачи, allocation-aware (R08) ========
+' 2.1.0 fix: раньше повторный частичный возврат снова проходил allocations исходной выдачи по
+' порядку FIFO БЕЗ учёта того, что часть каждой allocation уже была возвращена ранее - второй
+' возврат мог повторно "попасть" в ту же самую (уже частично возвращённую) партию вместо
+' следующей по очереди. Теперь для каждой allocation вычитается уже возвращённое по НЕЙ ЖЕ
+' (DB_PRIME_RETURN_ALLOCATIONS, только COMMITTED) - остаток по каждой партии восстанавливается
+' в правильном порядке, а не только правильной суммой.
 Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
     Dim retHeaders As Variant
     retHeaders = PRIME_HeaderMap(SH_DB_RETURNS)
+    Dim hasRetAlloc As Boolean
+    hasRetAlloc = PRIME_SheetExists(SH_DB_RETURN_ALLOCATIONS)
+    Dim retAllocHeaders As Variant
+    If hasRetAlloc Then retAllocHeaders = PRIME_HeaderMap(SH_DB_RETURN_ALLOCATIONS)
 
     Dim moveRowsBuf() As Variant
     Dim retRowsBuf(plan.LineCount - 1) As Variant
-    Dim moveCount As Long
-    moveCount = 0
-    ReDim moveRowsBuf(200)
+    Dim retAllocRowsBuf() As Variant
+    Dim moveCount As Long, retAllocCount As Long
+    moveCount = 0 : retAllocCount = 0
+    ReDim moveRowsBuf(4000)
+    ReDim retAllocRowsBuf(4000)
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
+        Dim returnId As String
+        returnId = docId & "-R" & (i + 1)
+
         Dim lots() As String
         Dim allocatedQty() As Double
         PRIME_AllocationsForDocLine(plan.Lines(i).OriginalDocLineId, lots, allocatedQty)
@@ -558,13 +753,24 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
         If UBound(lots) >= LBound(lots) Then
             For j = LBound(lots) To UBound(lots)
                 If remaining <= 0.0000005 Then Exit For
-                Dim take As Double
-                take = remaining
-                If allocatedQty(j) < take Then take = allocatedQty(j)
-                If take > 0 Then
+                Dim allocId As String
+                allocId = "ALC-" & plan.Lines(i).OriginalDocLineId & "-" & lots(j)
+                Dim alreadyReturnedHere As Double
+                alreadyReturnedHere = PRIME_AlreadyReturnedForAllocation(allocId)
+                Dim availableInAlloc As Double
+                availableInAlloc = allocatedQty(j) - alreadyReturnedHere
+                If availableInAlloc > 0.0000005 Then
+                    Dim take As Double
+                    take = remaining
+                    If availableInAlloc < take Then take = availableInAlloc
                     moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                        lots(j), take, plan.Lines(i).LocationTo, plan.DocDate, opId)
+                        lots(j), take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
                     moveCount = moveCount + 1
+                    If hasRetAlloc Then
+                        If retAllocCount > UBound(retAllocRowsBuf) Then ReDim Preserve retAllocRowsBuf(UBound(retAllocRowsBuf) + 4000)
+                        retAllocRowsBuf(retAllocCount) = PRIME_BuildReturnAllocationRow(retAllocHeaders, returnId, allocId, lots(j), take, opId)
+                        retAllocCount = retAllocCount + 1
+                    End If
                     remaining = remaining - take
                 End If
             Next j
@@ -574,16 +780,19 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
             ' allocations) - возврат всё равно проводим на условное "безлотовое" движение,
             ' чтобы не заблокировать документ, но это ухудшает трассируемость партии.
             moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                "", remaining, plan.Lines(i).LocationTo, plan.DocDate, opId)
+                "", remaining, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
             moveCount = moveCount + 1
         End If
 
         Dim retRow(UBound(retHeaders)) As Variant
-        retRow(PRIME_ColIndex(retHeaders, "RETURN_ID")) = docId & "-R" & (i + 1)
+        retRow(PRIME_ColIndex(retHeaders, "RETURN_ID")) = returnId
         retRow(PRIME_ColIndex(retHeaders, "ORIGINAL_ISSUE_DOC_LINE_ID")) = plan.Lines(i).OriginalDocLineId
         retRow(PRIME_ColIndex(retHeaders, "RETURN_DOC_ID")) = docId
         retRow(PRIME_ColIndex(retHeaders, "QTY_BASE")) = plan.Lines(i).QtyBase
         retRow(PRIME_ColIndex(retHeaders, "RETURN_DATE")) = plan.DocDate
+        Dim colOpIdRet As Long
+        colOpIdRet = PRIME_ColIndex(retHeaders, "OP_ID")
+        If colOpIdRet >= 0 Then retRow(colOpIdRet) = opId
         retRowsBuf(i) = retRow
     Next i
 
@@ -592,39 +801,237 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
         PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
     End If
     PRIME_AppendRowsBatch(SH_DB_RETURNS, retRowsBuf)
+    If hasRetAlloc And retAllocCount > 0 Then
+        ReDim Preserve retAllocRowsBuf(retAllocCount - 1)
+        PRIME_AppendRowsBatch(SH_DB_RETURN_ALLOCATIONS, retAllocRowsBuf)
+    End If
 End Sub
 
-' === TRANSFER: OUT + IN, суммарный остаток товара не меняется ================================
+Private Function PRIME_BuildReturnAllocationRow(ByVal headers As Variant, ByVal returnId As String, ByVal allocId As String, _
+        ByVal lotId As String, ByVal qty As Double, ByVal opId As String) As Variant
+    Dim row(UBound(headers)) As Variant
+    row(PRIME_ColIndex(headers, "RETURN_ID")) = returnId
+    row(PRIME_ColIndex(headers, "ALLOC_ID")) = allocId
+    row(PRIME_ColIndex(headers, "LOT_ID")) = lotId
+    row(PRIME_ColIndex(headers, "QTY_BASE")) = qty
+    row(PRIME_ColIndex(headers, "OP_ID")) = opId
+    PRIME_BuildReturnAllocationRow = row
+End Function
+
+' R08: сколько уже COMMITTED-возвращено по конкретной allocation (не по всей строке выдачи).
+Public Function PRIME_AlreadyReturnedForAllocation(ByVal allocId As String) As Double
+    If allocId = "" Or Not PRIME_SheetExists(SH_DB_RETURN_ALLOCATIONS) Then
+        PRIME_AlreadyReturnedForAllocation = 0
+        Exit Function
+    End If
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_DB_RETURN_ALLOCATIONS)
+    Dim colAlloc As Long, colQty As Long, colOpId As Long
+    colAlloc = PRIME_ColIndex(headers, "ALLOC_ID")
+    colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_DB_RETURN_ALLOCATIONS)
+    Dim total As Double
+    total = 0
+    If UBound(table) >= 1 Then
+        Dim i As Long
+        For i = 1 To UBound(table)
+            If CStr(table(i)(colAlloc)) = allocId Then
+                If PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
+                    total = total + CDbl(table(i)(colQty))
+                End If
+            End If
+        Next i
+    End If
+    PRIME_AlreadyReturnedForAllocation = total
+End Function
+
+' === TRANSFER: FIFO-разбиение по партиям исходного (место,контур), lot lineage (R05) ===========
+' 2.1.0 полный редизайн: раньше писал два "безлотовых" движения (LOT_ID="") - партия физически
+' не сохранялась, из-за чего дальнейший FIFO по партиям товара не видел перемещённый остаток
+' как отдельную партию (R05/R06). Теперь для каждого куска, взятого из исходной партии по FIFO,
+' создаётся НОВАЯ партия-назначение с PARENT_LOT_ID=исходная (полная трассируемость), и именно
+' она увеличивает остаток в новом месте/контуре.
 Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim rows(plan.LineCount * 2 - 1) As Variant
+    Dim lotHeaders As Variant
+    lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
+
+    Dim moveRowsBuf() As Variant
+    Dim lotRowsBuf() As Variant
+    Dim moveCount As Long, lotCount As Long
+    moveCount = 0 : lotCount = 0
+    ReDim moveRowsBuf(4000)
+    ReDim lotRowsBuf(4000)
+
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        rows(i * 2) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-            "", -plan.Lines(i).QtyBase, plan.Lines(i).LocationFrom, plan.DocDate, opId)
-        rows(i * 2 + 1) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-            "", plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId)
+        Dim lots() As String
+        Dim balances() As Double
+        PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).ContourFrom, lots, balances)
+
+        Dim remaining As Double
+        remaining = plan.Lines(i).QtyBase
+        Dim j As Long
+        For j = LBound(lots) To UBound(lots)
+            If remaining <= 0.0000005 Then Exit For
+            If balances(j) > 0 Then
+                Dim take As Double
+                take = remaining
+                If balances(j) < take Then take = balances(j)
+
+                If moveCount > UBound(moveRowsBuf) - 1 Then
+                    ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
+                End If
+                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                    lots(j), -take, plan.Lines(i).LocationFrom, plan.DocDate, opId, plan.Lines(i).ContourFrom)
+                moveCount = moveCount + 1
+
+                Dim destLotId As String
+                destLotId = "LOT-" & Format(PRIME_SequenceNext("LOT_ID"), "00000000")
+                Dim srcReceiptDate As String
+                srcReceiptDate = PRIME_GetLotField(lots(j), "RECEIPT_DATE")
+                If srcReceiptDate = "" Then srcReceiptDate = plan.DocDate
+
+                If lotCount > UBound(lotRowsBuf) Then ReDim Preserve lotRowsBuf(UBound(lotRowsBuf) + 4000)
+                Dim lotRow(UBound(lotHeaders)) As Variant
+                lotRow(PRIME_ColIndex(lotHeaders, "LOT_ID")) = destLotId
+                lotRow(PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")) = plan.Lines(i).ProductCode
+                lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")) = docId
+                lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_LINE_ID")) = PRIME_LineIdFor(i)
+                lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")) = srcReceiptDate ' сохраняем возраст партии для FIFO
+                lotRow(PRIME_ColIndex(lotHeaders, "LOCATION")) = plan.Lines(i).LocationTo
+                lotRow(PRIME_ColIndex(lotHeaders, "ORIGINAL_QTY_BASE")) = take
+                lotRow(PRIME_ColIndex(lotHeaders, "BASE_UNIT")) = PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT")
+                lotRow(PRIME_ColIndex(lotHeaders, "ORIGIN")) = "TRANSFER"
+                lotRow(PRIME_ColIndex(lotHeaders, "ORDER_ID")) = ""
+                Dim colContourTo As Long
+                colContourTo = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
+                If colContourTo >= 0 Then lotRow(colContourTo) = plan.Lines(i).ContourTo
+                Dim colParent As Long
+                colParent = PRIME_ColIndex(lotHeaders, "PARENT_LOT_ID")
+                If colParent >= 0 Then lotRow(colParent) = lots(j)
+                lotRowsBuf(lotCount) = lotRow
+                lotCount = lotCount + 1
+
+                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                    destLotId, take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).ContourTo)
+                moveCount = moveCount + 1
+
+                remaining = remaining - take
+            End If
+        Next j
+
+        If remaining > 0.0000005 Then
+            Err.Raise 1021, "PRIME_Posting.PRIME_PostTransferLines", "Недостаточно партий для перемещения строки " & (i + 1) & " после валидации - проведение отменено."
+        End If
     Next i
-    PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, rows)
+
+    If lotCount > 0 Then
+        ReDim Preserve lotRowsBuf(lotCount - 1)
+        PRIME_AppendRowsBatch(SH_DB_LOTS, lotRowsBuf)
+    End If
+    PRIME_AuditLog(opId, STAGE_LOTS_WRITTEN, plan.SourceSheet, docId)
+    If moveCount > 0 Then
+        ReDim Preserve moveRowsBuf(moveCount - 1)
+        PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
+    End If
 End Sub
 
-' === ADJUSTMENT: разница инвентаризации, знак берётся из QtyBase (может быть отрицательным) ===
+' === ADJUSTMENT: инвентаризация, lot-consistent (R06) ==========================================
+' 2.1.0 полный редизайн: раньше писал одно "безлотовое" движение (LOT_ID="") - расходилось с
+' партийным FIFO (stock по месту менялся, а сумма балансов партий - нет). Теперь недостача
+' списывается СО СПЕЦИФИЧНЫХ партий по FIFO (как обычное списание), а излишек создаёт НОВУЮ
+' партию происхождения "ADJUSTMENT" - после проведения stock == sum(lot balances) гарантированно.
 Private Sub PRIME_PostAdjustmentLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim rows(plan.LineCount - 1) As Variant
+    Dim lotHeaders As Variant
+    lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
+
+    Dim moveRowsBuf() As Variant
+    Dim lotRowsBuf() As Variant
+    Dim moveCount As Long, lotCount As Long
+    moveCount = 0 : lotCount = 0
+    ReDim moveRowsBuf(4000)
+    ReDim lotRowsBuf(plan.LineCount)
+
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        rows(i) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-            "", plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId)
+        If plan.Lines(i).QtyBase > 0 Then
+            ' Излишек - новая партия происхождения "ADJUSTMENT".
+            Dim newLotId As String
+            newLotId = "LOT-" & Format(PRIME_SequenceNext("LOT_ID"), "00000000")
+            Dim lotRow(UBound(lotHeaders)) As Variant
+            lotRow(PRIME_ColIndex(lotHeaders, "LOT_ID")) = newLotId
+            lotRow(PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")) = plan.Lines(i).ProductCode
+            lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")) = docId
+            lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_LINE_ID")) = PRIME_LineIdFor(i)
+            lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")) = plan.DocDate
+            lotRow(PRIME_ColIndex(lotHeaders, "LOCATION")) = plan.Lines(i).LocationTo
+            lotRow(PRIME_ColIndex(lotHeaders, "ORIGINAL_QTY_BASE")) = plan.Lines(i).QtyBase
+            lotRow(PRIME_ColIndex(lotHeaders, "BASE_UNIT")) = PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT")
+            lotRow(PRIME_ColIndex(lotHeaders, "ORIGIN")) = "ADJUSTMENT"
+            lotRow(PRIME_ColIndex(lotHeaders, "ORDER_ID")) = ""
+            Dim colContourAdj As Long
+            colContourAdj = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
+            If colContourAdj >= 0 Then lotRow(colContourAdj) = plan.Lines(i).Contour
+            lotRowsBuf(lotCount) = lotRow
+            lotCount = lotCount + 1
+
+            moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                newLotId, plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
+            moveCount = moveCount + 1
+        Else
+            ' Недостача - списываем со специфичных партий по FIFO (место+контур), как ISSUE.
+            Dim shortage As Double
+            shortage = -plan.Lines(i).QtyBase
+            Dim lots() As String
+            Dim balances() As Double
+            PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, plan.Lines(i).LocationTo, plan.Lines(i).Contour, lots, balances)
+            Dim j As Long
+            For j = LBound(lots) To UBound(lots)
+                If shortage <= 0.0000005 Then Exit For
+                If balances(j) > 0 Then
+                    Dim take As Double
+                    take = shortage
+                    If balances(j) < take Then take = balances(j)
+                    If moveCount > UBound(moveRowsBuf) Then ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
+                    moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                        lots(j), -take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
+                    moveCount = moveCount + 1
+                    shortage = shortage - take
+                End If
+            Next j
+            ' Если найденных партий не хватило на всю недостачу (расчёт разницы устарел -
+            ' движения появились уже после снимка инвентаризации), списываем остаток без
+            ' привязки к партии - лучше провести с честной пометкой в диагностике, чем
+            ' заблокировать инвентаризацию целиком.
+            If shortage > 0.0000005 Then
+                If moveCount > UBound(moveRowsBuf) Then ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
+                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                    "", -shortage, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
+                moveCount = moveCount + 1
+                PRIME_AuditLog(opId, STAGE_ERROR, plan.SourceSheet, "ADJUSTMENT_SHORTAGE_EXCEEDS_LOTS:" & plan.Lines(i).ProductCode)
+            End If
+        End If
     Next i
-    PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, rows)
+
+    If lotCount > 0 Then
+        ReDim Preserve lotRowsBuf(lotCount - 1)
+        PRIME_AppendRowsBatch(SH_DB_LOTS, lotRowsBuf)
+    End If
+    If moveCount > 0 Then
+        ReDim Preserve moveRowsBuf(moveCount - 1)
+        PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
+    End If
 End Sub
 
 Private Function PRIME_BuildMovementRow(ByVal headers As Variant, ByVal docId As String, ByVal docLineId As String, _
         ByVal productCode As String, ByVal lotId As String, ByVal qtyBase As Double, ByVal location As String, _
-        ByVal moveDate As String, ByVal opId As String) As Variant
+        ByVal moveDate As String, ByVal opId As String, ByVal stockContour As String) As Variant
     Dim row(UBound(headers)) As Variant
     row(PRIME_ColIndex(headers, "MOVE_ID")) = "MOV-" & Format(PRIME_SequenceNext("MOVE_ID"), "00000000")
     row(PRIME_ColIndex(headers, "DOC_ID")) = docId
@@ -635,24 +1042,29 @@ Private Function PRIME_BuildMovementRow(ByVal headers As Variant, ByVal docId As
     row(PRIME_ColIndex(headers, "LOCATION")) = location
     row(PRIME_ColIndex(headers, "MOVE_DATE")) = moveDate
     row(PRIME_ColIndex(headers, "OP_ID")) = opId
+    Dim colContour As Long
+    colContour = PRIME_ColIndex(headers, "STOCK_CONTOUR")
+    If colContour >= 0 Then row(colContour) = stockContour
     PRIME_BuildMovementRow = row
 End Function
 
 ' === FIFO / остатки по партиям =================================================================
-' Партии товара, отсортированные по дате прихода и LOT_ID (fifo.sort_order), с текущим балансом
-' (сумма COMMITTED-движений по каждой партии). Только партии с положительным балансом полезны
-' для списания, но возвращаем все для прозрачности вызывающему.
-Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByRef lots() As String, ByRef balances() As Double)
+' R02 (2.1.0): партии товара строго на конкретном (месте, контуре), отсортированные по дате
+' прихода и LOT_ID (fifo.sort_order), с текущим балансом (сумма COMMITTED-движений). Только
+' партии с положительным балансом полезны для списания, но возвращаем все для прозрачности.
+Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByVal location As String, ByVal contour As String, ByRef lots() As String, ByRef balances() As Double)
     If Not PRIME_SheetExists(SH_DB_LOTS) Then
         ReDim lots(-1) : ReDim balances(-1)
         Exit Sub
     End If
     Dim lotHeaders As Variant
     lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
-    Dim colCode As Long, colLotId As Long, colDate As Long
+    Dim colCode As Long, colLotId As Long, colDate As Long, colLoc As Long, colContour As Long
     colCode = PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")
     colLotId = PRIME_ColIndex(lotHeaders, "LOT_ID")
     colDate = PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")
+    colLoc = PRIME_ColIndex(lotHeaders, "LOCATION")
+    colContour = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
 
     Dim lotTable As Variant
     lotTable = PRIME_ReadTable(SH_DB_LOTS)
@@ -672,9 +1084,13 @@ Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByRef lots() As
     Dim i As Long
     For i = 1 To UBound(lotTable)
         If CStr(lotTable(i)(colCode)) = productCode Then
-            candLots(n) = CStr(lotTable(i)(colLotId))
-            candDates(n) = CStr(lotTable(i)(colDate))
-            n = n + 1
+            If location = "" Or CStr(lotTable(i)(colLoc)) = location Then
+                If contour = "" Or colContour < 0 Or CStr(lotTable(i)(colContour)) = contour Then
+                    candLots(n) = CStr(lotTable(i)(colLotId))
+                    candDates(n) = CStr(lotTable(i)(colDate))
+                    n = n + 1
+                End If
+            End If
         End If
     Next i
 
@@ -703,6 +1119,13 @@ Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByRef lots() As
         lots(i) = candLots(i)
         balances(i) = PRIME_LotBalance(candLots(i))
     Next i
+End Sub
+
+' Тот же список партий, но БЕЗ фильтра по месту/контуру - только для информационных/read-only
+' экранов (Комплекты - предварительная проверка достаточности, Поиск - "Партии товара"), где
+' пользователь ещё не выбрал конкретное место списания. НЕ использовать при реальном проведении.
+Public Sub PRIME_FifoLotsForProductAny(ByVal productCode As String, ByRef lots() As String, ByRef balances() As Double)
+    PRIME_FifoLotsForProduct(productCode, "", "", lots, balances)
 End Sub
 
 ' committed_only_stock (2.0.1): суммирует ТОЛЬКО движения, чей OP_ID зафиксирован как
@@ -740,10 +1163,29 @@ Public Function PRIME_LotBalance(ByVal lotId As String) As Double
     PRIME_LotBalance = total
 End Function
 
+' R02: остаток строго по (товар, место, контур) - сумма балансов партий, попадающих под эти
+' три ключа. Единственный источник правды для проверки доступности при ISSUE/TRANSFER.
+Public Function PRIME_LocationContourBalance(ByVal productCode As String, ByVal location As String, ByVal contour As String) As Double
+    Dim lots() As String
+    Dim balances() As Double
+    PRIME_FifoLotsForProduct(productCode, location, contour, lots, balances)
+    Dim total As Double
+    total = 0
+    If UBound(lots) >= LBound(lots) Then
+        Dim i As Long
+        For i = LBound(balances) To UBound(balances)
+            total = total + balances(i)
+        Next i
+    End If
+    PRIME_LocationContourBalance = total
+End Function
+
+' Общий остаток товара по ВСЕМ местам/контурам сразу - только для информационных сводок
+' (Комплекты, "Наличие"), не для проверки доступности конкретной операции (см. R02 выше).
 Public Function PRIME_TotalLotBalance(ByVal productCode As String) As Double
     Dim lots() As String
     Dim balances() As Double
-    PRIME_FifoLotsForProduct(productCode, lots, balances)
+    PRIME_FifoLotsForProductAny(productCode, lots, balances)
     Dim total As Double
     total = 0
     If UBound(lots) >= LBound(lots) Then
@@ -753,6 +1195,33 @@ Public Function PRIME_TotalLotBalance(ByVal productCode As String) As Double
         Next i
     End If
     PRIME_TotalLotBalance = total
+End Function
+
+' Значение произвольного поля партии по LOT_ID (используется TRANSFER, чтобы унаследовать
+' RECEIPT_DATE исходной партии в новую партию-назначение и не "омолаживать" её FIFO-возраст).
+Public Function PRIME_GetLotField(ByVal lotId As String, ByVal fieldName As String) As String
+    If lotId = "" Or Not PRIME_SheetExists(SH_DB_LOTS) Then
+        PRIME_GetLotField = ""
+        Exit Function
+    End If
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_DB_LOTS)
+    Dim colLotId As Long, colField As Long
+    colLotId = PRIME_ColIndex(headers, "LOT_ID")
+    colField = PRIME_ColIndex(headers, fieldName)
+    If colField < 0 Then
+        PRIME_GetLotField = ""
+        Exit Function
+    End If
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_DB_LOTS)
+    Dim idx As Long
+    idx = PRIME_FindRowByKey(table, colLotId, lotId)
+    If idx = -1 Then
+        PRIME_GetLotField = ""
+    Else
+        PRIME_GetLotField = CStr(table(idx)(colField))
+    End If
 End Function
 
 ' Разбиение исходной строки выдачи по партиям (для симметричного возврата).
@@ -795,8 +1264,15 @@ Public Sub PRIME_AllocationsForDocLine(ByVal docLineId As String, ByRef lots() A
     End If
 End Sub
 
+' R07 (2.1.0): учитывает только строки COMMITTED документа - раньше читал DB_PRIME_DOC_LINES
+' без проверки состояния владеющей транзакции, поэтому строка документа, физически записанная
+' до отката на FAILED, ошибочно считалась бы существующей выдачей при проверке возврата.
 Public Function PRIME_DocLineQtyBase(ByVal docLineId As String) As Double
     If docLineId = "" Then
+        PRIME_DocLineQtyBase = 0
+        Exit Function
+    End If
+    If Not PRIME_IsDocIdCommitted(PRIME_DocIdFromLineId(docLineId)) Then
         PRIME_DocLineQtyBase = 0
         Exit Function
     End If
@@ -816,6 +1292,7 @@ Public Function PRIME_DocLineQtyBase(ByVal docLineId As String) As Double
     End If
 End Function
 
+' R07 (2.1.0): суммирует только COMMITTED возвраты (см. PRIME_DbReturnsColumns - колонка OP_ID).
 Public Function PRIME_AlreadyReturnedQtyBase(ByVal originalDocLineId As String) As Double
     If originalDocLineId = "" Or Not PRIME_SheetExists(SH_DB_RETURNS) Then
         PRIME_AlreadyReturnedQtyBase = 0
@@ -823,9 +1300,10 @@ Public Function PRIME_AlreadyReturnedQtyBase(ByVal originalDocLineId As String) 
     End If
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_DB_RETURNS)
-    Dim colOrig As Long, colQty As Long
+    Dim colOrig As Long, colQty As Long, colOpId As Long
     colOrig = PRIME_ColIndex(headers, "ORIGINAL_ISSUE_DOC_LINE_ID")
     colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
     Dim table As Variant
     table = PRIME_ReadTable(SH_DB_RETURNS)
     Dim total As Double
@@ -834,7 +1312,10 @@ Public Function PRIME_AlreadyReturnedQtyBase(ByVal originalDocLineId As String) 
         Dim i As Long
         For i = 1 To UBound(table)
             If CStr(table(i)(colOrig)) = originalDocLineId Then
-                total = total + CDbl(table(i)(colQty))
+                Dim countIt As Boolean
+                countIt = True
+                If colOpId >= 0 Then countIt = PRIME_IsOpIdCommitted(CStr(table(i)(colOpId)))
+                If countIt Then total = total + CDbl(table(i)(colQty))
             End If
         Next i
     End If

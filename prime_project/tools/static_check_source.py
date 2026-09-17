@@ -24,6 +24,7 @@ REQUIRED_MODULES = [
     "PRIME_04_Posting", "PRIME_05_Orders", "PRIME_06_Issues", "PRIME_07_Workflows",
     "PRIME_08_ReturnsInventory", "PRIME_09_StockSearch", "PRIME_10_ActsReports",
     "PRIME_11_Kits", "PRIME_12_UI", "PRIME_13_Diagnostics", "PRIME_14_MigrationInstaller",
+    "PRIME_15_Transfers", "PRIME_16_Journal",
 ]
 
 FORBIDDEN_IN_RUNTIME = ["WMSDB", "WMSDBST", "WMSDBO", "WMSDBIU", "WMSDBR", "WMSDBS", "WMSARCH"]

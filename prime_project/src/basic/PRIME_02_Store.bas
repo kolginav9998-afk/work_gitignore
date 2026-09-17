@@ -13,6 +13,7 @@ Option Explicit
 Private gHeaderCache As Object      ' Collection: имя листа -> Variant(массив заголовков)
 Private gCommittedKeyCache As Object ' Collection: SOURCE_KEY -> DOC_ID, только для COMMITTED
 Private gCommittedOpIdCache As Object ' Collection: OP_ID -> True, только для COMMITTED (committed_only_stock)
+Private gCommittedDocIdCache As Object ' Collection: DOC_ID -> True, только для COMMITTED (2.1.0, committed_only_everywhere)
 
 Private Function PRIME_Doc() As Object
     PRIME_Doc = ThisComponent
@@ -124,7 +125,20 @@ Public Function PRIME_ReadTable(ByVal sheetName As String) As Variant
     lastCol = PRIME_FindLastCol(oSheet)
     If lastCol < 0 Then lastCol = 0
     If lastRow < headerRow Then
+        ' 2.1.0 critical fix: table(0) must be a PROPER (lastCol+1)-wide phantom row of Empty
+        ' values, not a bare Empty scalar - several callers (PRIME_SequenceNext, PRIME_MetaSet,
+        ' and any future code following the same pattern) size a brand-new row via
+        ' "Dim newRow(UBound(table(0))) As Variant" when no data row exists yet to copy from.
+        ' A bare Empty scalar there made UBound(table(0)) resolve to -1 (StarBasic's "empty
+        ' array" convention, used throughout this codebase for genuinely empty result arrays -
+        ' see the many "ReDim x(-1)" calls elsewhere), so newRow was declared with ZERO elements
+        ' and the very next "newRow(colName) = ..." wrote out of bounds. Confirmed by direct
+        ' function invocation: PRIME_SequenceNext("DOC_ID") - or any sequence name - crashed the
+        ' FIRST TIME EVER it ran on a genuinely empty SYS_PRIME_SEQ, which in practice meant the
+        ' very first order/receipt/issue/etc. a brand-new PRIME workbook ever tried to create.
+        Dim phantomRow(lastCol) As Variant
         Dim empty1(0) As Variant
+        empty1(0) = phantomRow
         PRIME_ReadTable = empty1
         Exit Function
     End If
@@ -216,6 +230,7 @@ End Function
 Public Sub PRIME_RebuildCommittedKeyCache()
     Set gCommittedKeyCache = New Collection
     Set gCommittedOpIdCache = New Collection
+    Set gCommittedDocIdCache = New Collection
     If Not PRIME_SheetExists(SH_SYS_TX) Then Exit Sub
 
     Dim tx As Variant
@@ -243,6 +258,9 @@ Public Sub PRIME_RebuildCommittedKeyCache()
             If Not PRIME_CollectionHasKey(gCommittedOpIdCache, opId) Then
                 gCommittedOpIdCache.Add(True, opId)
             End If
+            If Not PRIME_CollectionHasKey(gCommittedDocIdCache, CStr(tx(i)(colDocId))) Then
+                gCommittedDocIdCache.Add(True, CStr(tx(i)(colDocId)))
+            End If
         End If
     Next i
 End Sub
@@ -260,24 +278,37 @@ Public Function PRIME_FindCommittedBySourceKey(ByVal sourceKey As String) As Str
     End If
 End Function
 
-Public Sub PRIME_RegisterCommittedKey(ByVal sourceKey As String, ByVal docId As String)
+' 2.1.0 critical fix (R01): раньше регистрировал ТОЛЬКО SOURCE_KEY->DOC_ID и не трогал
+' gCommittedOpIdCache/gCommittedDocIdCache - PRIME_IsOpIdCommitted(только что закоммиченного
+' opId) возвращал False до следующего PRIME_RebuildCommittedKeyCache (обычно - до переоткрытия
+' документа), поэтому только что проведённый приход мог не попасть в остаток/FIFO в ТЕКУЩЕМ
+' сеансе. Теперь все три кэша обновляются в одном месте синхронно.
+Public Sub PRIME_RegisterCommittedKey(ByVal sourceKey As String, ByVal docId As String, ByVal opId As String)
     If gCommittedKeyCache Is Nothing Then
         PRIME_RebuildCommittedKeyCache()
     End If
     If Not PRIME_CollectionHasKey(gCommittedKeyCache, sourceKey) Then
         gCommittedKeyCache.Add(docId, sourceKey)
     End If
+    If Not PRIME_CollectionHasKey(gCommittedOpIdCache, opId) Then
+        gCommittedOpIdCache.Add(True, opId)
+    End If
+    If Not PRIME_CollectionHasKey(gCommittedDocIdCache, docId) Then
+        gCommittedDocIdCache.Add(True, docId)
+    End If
 End Sub
 
-' transaction_cache_store_consistency (2.0.1): вызывается, когда COMMITTED уже был выставлен
-' и SOURCE_KEY уже зарегистрирован здесь, но последующий ThisComponent.store() всё же
-' провалился и TX откатывается на FAILED (см. PRIME_PostDocument.PostFailed) - без этого
-' отката повторная попытка того же SOURCE_KEY ошибочно получила бы ответ "уже проведено",
-' хотя реально проведённая операция была помечена как FAILED.
-Public Sub PRIME_UnregisterCommittedKey(ByVal sourceKey As String)
-    If gCommittedKeyCache Is Nothing Then Exit Sub
+' transaction_cache_store_consistency (2.0.1, расширено в 2.1.0): вызывается, когда COMMITTED
+' уже был выставлен и SOURCE_KEY/OP_ID/DOC_ID уже зарегистрированы здесь, но последующий
+' ThisComponent.store() всё же провалился и TX откатывается на FAILED (см.
+' PRIME_PostDocument.PostFailed) - без этого отката повторная попытка того же SOURCE_KEY
+' ошибочно получила бы ответ "уже проведено", а Returns/Documents/Lines той же операции
+' продолжали бы ошибочно считаться COMMITTED (committed_only_everywhere).
+Public Sub PRIME_UnregisterCommittedKey(ByVal sourceKey As String, ByVal docId As String, ByVal opId As String)
     On Error Resume Next
-    gCommittedKeyCache.Remove(sourceKey)
+    If Not (gCommittedKeyCache Is Nothing) Then gCommittedKeyCache.Remove(sourceKey)
+    If Not (gCommittedOpIdCache Is Nothing) Then gCommittedOpIdCache.Remove(opId)
+    If Not (gCommittedDocIdCache Is Nothing) Then gCommittedDocIdCache.Remove(docId)
     On Error Goto 0
 End Sub
 
@@ -287,6 +318,34 @@ Public Function PRIME_IsOpIdCommitted(ByVal opId As String) As Boolean
         PRIME_RebuildCommittedKeyCache()
     End If
     PRIME_IsOpIdCommitted = PRIME_CollectionHasKey(gCommittedOpIdCache, opId)
+End Function
+
+' committed_only_everywhere (2.1.0, R07): True, только если DOC_ID реально COMMITTED - нужно
+' всем чтениям DB_PRIME_DOCUMENTS/DOC_LINES/RETURNS/ALLOCATIONS/ORDER_SNAPSHOT, которые сами по
+' себе не хранят STATE и раньше могли увидеть строки, физически записанные ДО отката на FAILED
+' (см. PRIME_04_Posting.PRIME_WriteDocumentHeader - пишет строки на шаге 4, до TX_COMMITTED).
+Public Function PRIME_IsDocIdCommitted(ByVal docId As String) As Boolean
+    If docId = "" Then
+        PRIME_IsDocIdCommitted = False
+        Exit Function
+    End If
+    If gCommittedDocIdCache Is Nothing Then
+        PRIME_RebuildCommittedKeyCache()
+    End If
+    PRIME_IsDocIdCommitted = PRIME_CollectionHasKey(gCommittedDocIdCache, docId)
+End Function
+
+' DOC_LINE_ID всегда имеет вид "<DOC_ID>-L<n>" (см. PRIME_04_Posting.PRIME_WriteDocLines) -
+' DOC_ID сам по себе может содержать дефисы ("DOC-00000123"), поэтому ищем ПОСЛЕДНЕЕ "-L", а не
+' режем по первому дефису.
+Public Function PRIME_DocIdFromLineId(ByVal docLineId As String) As String
+    Dim pos As Long
+    pos = InStrRev(docLineId, "-L")
+    If pos <= 0 Then
+        PRIME_DocIdFromLineId = ""
+    Else
+        PRIME_DocIdFromLineId = Left(docLineId, pos - 1)
+    End If
 End Function
 
 ' --- Générique: следующий номер последовательности (SYS_PRIME_SEQ), пакетно безопасно ---
