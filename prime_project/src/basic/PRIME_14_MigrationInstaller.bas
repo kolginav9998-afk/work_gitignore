@@ -509,6 +509,7 @@ Public Function PRIME_Migration_MigrateOrdersSheet(ByRef oldCodes() As String, B
                 oSheet.getCellByPosition(colRemaining, r).setValue(CDbl(orderedStr))
             End If
         End If
+        PRIME_Orders_RecomputeStatus(oSheet, headers2, r)
     Next r
 
     PRIME_Migration_MigrateOrdersSheet = PRIME_Migration_SeedProductsFromOrders(oldCodes, newCodes)

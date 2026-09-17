@@ -27,6 +27,28 @@ Public Sub PRIME_Stock_SearchByCodeButton()
     PRIME_Stock_Rebuild("CODE", Trim(code))
 End Sub
 
+' Дополнительные фильтры остатка (recommendation §32): категория/подкатегория/место хранения.
+Public Sub PRIME_Stock_ShowByCategoryButton()
+    Dim value As String
+    value = InputBox("Категория:", "Остаток по категории")
+    If Trim(value) = "" Then Exit Sub
+    PRIME_Stock_Rebuild("CATEGORY", Trim(value))
+End Sub
+
+Public Sub PRIME_Stock_ShowBySubcategoryButton()
+    Dim value As String
+    value = InputBox("Подкатегория:", "Остаток по подкатегории")
+    If Trim(value) = "" Then Exit Sub
+    PRIME_Stock_Rebuild("SUBCATEGORY", Trim(value))
+End Sub
+
+Public Sub PRIME_Stock_ShowByLocationButton()
+    Dim value As String
+    value = InputBox("Место хранения:", "Остаток по месту хранения")
+    If Trim(value) = "" Then Exit Sub
+    PRIME_Stock_Rebuild("LOCATION", Trim(value))
+End Sub
+
 Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As String)
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_STOCK)
@@ -67,6 +89,9 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
         Dim pc As String, loc As String
         pc = CStr(moveTable(i)(colProduct))
         If filterMode = "CODE" And pc <> filterValue Then GoTo ContinueLoop
+        If filterMode = "CATEGORY" And LCase(PRIME_GetProductField(pc, "CATEGORY")) <> LCase(filterValue) Then GoTo ContinueLoop
+        If filterMode = "SUBCATEGORY" And LCase(PRIME_GetProductField(pc, "SUBCATEGORY")) <> LCase(filterValue) Then GoTo ContinueLoop
+        If filterMode = "LOCATION" And LCase(CStr(moveTable(i)(colLoc))) <> LCase(filterValue) Then GoTo ContinueLoop
         ' committed_only_stock (2.0.1): лист "Остаток" не должен показывать PREPARED/FAILED
         ' движения как реальный остаток - см. PRIME_04_Posting.PRIME_LotBalance.
         If Not PRIME_IsOpIdCommitted(CStr(moveTable(i)(colOpId))) Then GoTo ContinueLoop

@@ -342,6 +342,84 @@ def test_retry_after_failed_store_is_not_treated_as_already_posted():
     check(was_new2 is True, "retry after a rolled-back failure must not be reported as a no-op repeat")
 
 
+# === Flexible date parsing (PRIME_00_Config.PRIME_ParseFlexibleDate) - PRIME 2.0.1 addition ===
+def parse_flexible_date(text, today_year=2026):
+    s = text.strip()
+    if not s:
+        return ""
+    for sep in (".", "/", "-"):
+        if sep in s:
+            parts = s.split(sep)
+            break
+    else:
+        return ""
+    if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return ""
+    day, month = int(parts[0]), int(parts[1])
+    if len(parts) >= 3 and parts[2].isdigit():
+        year = int(parts[2])
+        if year < 100:
+            year += 2000
+    else:
+        year = today_year
+    if not (1 <= day <= 31) or not (1 <= month <= 12):
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def test_flexible_date_parsing_accepted_formats():
+    check(parse_flexible_date("24.08") == "2026-08-24", "dot, no year")
+    check(parse_flexible_date("24/08") == "2026-08-24", "slash, no year")
+    check(parse_flexible_date("24-08") == "2026-08-24", "dash, no year")
+    check(parse_flexible_date("24.08.2026") == "2026-08-24", "dot, with year")
+    check(parse_flexible_date("24/08/2026") == "2026-08-24", "slash, with year")
+    check(parse_flexible_date("24-08-2026") == "2026-08-24", "dash, with year")
+
+
+def test_flexible_date_parsing_rejects_garbage():
+    check(parse_flexible_date("") == "", "empty input must not produce a fabricated date")
+    check(parse_flexible_date("not a date") == "", "unparseable text must return empty, not guess")
+    check(parse_flexible_date("99.99") == "", "out-of-range day/month must be rejected")
+
+
+# === Order status logic (PRIME_05_Orders.PRIME_Orders_RecomputeStatus) - PRIME 2.0.1 addition ===
+def compute_order_status(ordered, received, expected_date, today, current_status=""):
+    if current_status == "Отменено":
+        return current_status  # manual override, never recomputed
+    if ordered is None:
+        return "Черновик" if current_status == "" else current_status
+    if received and received >= ordered - 0.0000005:
+        status = "Получено"
+    elif received:
+        status = "Частично получено"
+    else:
+        status = "Ожидается"
+    if status != "Получено" and expected_date and expected_date < today:
+        status = "Просрочено"
+    return status
+
+
+def test_order_status_progression():
+    check(compute_order_status(None, None, "", "2026-01-01") == "Черновик", "nothing entered yet")
+    check(compute_order_status(10, 0, "", "2026-01-01") == "Ожидается", "ordered, nothing received")
+    check(compute_order_status(10, 6, "", "2026-01-01") == "Частично получено", "partial receipt")
+    check(compute_order_status(10, 10, "", "2026-01-01") == "Получено", "fully received")
+
+
+def test_order_status_overdue_rules():
+    check(compute_order_status(10, 0, "2026-01-01", "2026-06-01") == "Просрочено",
+          "expected date in the past with nothing received must be overdue")
+    check(compute_order_status(10, 10, "2026-01-01", "2026-06-01") == "Получено",
+          "a fully received order must never become overdue, even with a past expected date")
+    check(compute_order_status(10, 0, "", "2026-06-01") == "Ожидается",
+          "an empty expected date must never create an overdue status")
+
+
+def test_order_status_respects_manual_cancellation():
+    check(compute_order_status(10, 0, "2026-01-01", "2026-06-01", current_status="Отменено") == "Отменено",
+          "a manually cancelled order must never be overwritten by the automatic recompute")
+
+
 TESTS = [
     test_fifo_two_lots,
     test_fifo_shortage_rejects_whole_document,
@@ -358,6 +436,11 @@ TESTS = [
     test_event_guard_symmetric_after_blocked_nested_call,
     test_committed_only_stock_excludes_prepared_and_failed,
     test_retry_after_failed_store_is_not_treated_as_already_posted,
+    test_flexible_date_parsing_accepted_formats,
+    test_flexible_date_parsing_rejects_garbage,
+    test_order_status_progression,
+    test_order_status_overdue_rules,
+    test_order_status_respects_manual_cancellation,
 ]
 
 

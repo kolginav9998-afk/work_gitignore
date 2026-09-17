@@ -85,6 +85,74 @@ Public Function PRIME_FormSchemaFirstDataRow(ByVal sheetName As String) As Long
     PRIME_FormSchemaFirstDataRow = PRIME_FormSchemaHeaderRow(sheetName) + 1
 End Function
 
+' --- Статус заказа (order_status_logic, PRIME 2.0.1) ---
+Public Const ORDER_STATUS_DRAFT As String = "Черновик"
+Public Const ORDER_STATUS_EXPECTED As String = "Ожидается"
+Public Const ORDER_STATUS_PARTIAL As String = "Частично получено"
+Public Const ORDER_STATUS_RECEIVED As String = "Получено"
+Public Const ORDER_STATUS_OVERDUE As String = "Просрочено"
+Public Const ORDER_STATUS_CANCELLED As String = "Отменено"
+
+' Разбор пользовательского ввода даты (PRIME 2.0.1, recommendation dates support):
+' "24.08", "24/08", "24-08", "24.08.2026", "24/08/2026", "24-08-2026". День/месяц идут первыми
+' (формат заказчика, не ISO); год по умолчанию - текущий, если не указан. Возвращает
+' нормализованную "YYYY-MM-DD" либо "" при нераспознанном вводе - лучше оставить ввод как есть
+' (вызывающий не перезапишет ячейку), чем молча исказить дату по неверной догадке о формате.
+Public Function PRIME_ParseFlexibleDate(ByVal inputText As String) As String
+    Dim s As String
+    s = Trim(inputText)
+    If s = "" Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    Dim sep As String
+    If InStr(s, ".") > 0 Then
+        sep = "."
+    ElseIf InStr(s, "/") > 0 Then
+        sep = "/"
+    ElseIf InStr(s, "-") > 0 Then
+        sep = "-"
+    Else
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    Dim parts() As String
+    parts = Split(s, sep)
+    If UBound(parts) < 1 Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+    If Not IsNumeric(parts(0)) Or Not IsNumeric(parts(1)) Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    Dim dayNum As Long, monthNum As Long, yearNum As Long
+    dayNum = CLng(parts(0))
+    monthNum = CLng(parts(1))
+    ' StarBasic "And"/"Or" не короткозамкнуты (в отличие от AndAlso/OrElse) - оба операнда
+    ' вычисляются ВСЕГДА, поэтому "UBound(parts) >= 2 And IsNumeric(parts(2))" обращался бы к
+    ' parts(2) даже когда массив короче (только день+месяц, UBound=1), вызывая "Subscript out
+    ' of range" - в этой среде такая ошибка внутри вызванной извне функции не долетает как
+    ' видимое исключение, а молча обрывает вызывающий Sub целиком. Поэтому - вложенный If.
+    yearNum = Year(Now)
+    If UBound(parts) >= 2 Then
+        If IsNumeric(parts(2)) Then
+            yearNum = CLng(parts(2))
+            If yearNum < 100 Then yearNum = yearNum + 2000
+        End If
+    End If
+
+    If dayNum < 1 Or dayNum > 31 Or monthNum < 1 Or monthNum > 12 Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    PRIME_ParseFlexibleDate = Format(yearNum, "0000") & "-" & Format(monthNum, "00") & "-" & Format(dayNum, "00")
+End Function
+
 ' --- Идентичность товара ---
 Public Const PRODUCT_CODE_PREFIX As String = "ЕИ-"
 Public Const PRODUCT_CODE_DIGITS As Integer = 8

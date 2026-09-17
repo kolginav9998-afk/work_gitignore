@@ -77,14 +77,29 @@
 | `test_event_guard_symmetric_after_blocked_nested_call` (2.0.1) | После заблокированного вложенного события guard не остаётся "залипшим" | `PRIME_EventEnter`/`PRIME_EventLeave` |
 | `test_committed_only_stock_excludes_prepared_and_failed` (2.0.1) | PREPARED/FAILED движения не влияют на остаток, COMMITTED — влияет | `PRIME_LotBalance`/`PRIME_IsOpIdCommitted` |
 | `test_retry_after_failed_store_is_not_treated_as_already_posted` (2.0.1) | После неудачного `store()` повтор того же SOURCE_KEY не получает ложное "уже проведено" | `PRIME_UnregisterCommittedKey` |
+| `test_flexible_date_parsing_accepted_formats`/`_rejects_garbage` (2.0.1) | "24.08"/"24/08"/"24-08" (с годом и без) разбираются в "YYYY-MM-DD"; мусор/пустая строка возвращают "" | `PRIME_ParseFlexibleDate` |
+| `test_order_status_progression`/`_overdue_rules`/`_respects_manual_cancellation` (2.0.1) | Черновик→Ожидается→Частично получено→Получено; просрочка не создаётся пустой датой и не наступает для полностью полученного заказа; "Отменено" не перезаписывается | `PRIME_Orders_RecomputeStatus` |
 
-Последний известный прогон: **PASSED: 15/15**.
+Последний известный прогон: **PASSED: 20/20**. `PRIME_ParseFlexibleDate`/`PRIME_Orders_RecomputeStatus`
+дополнительно проверены прямым вызовом в реальном LibreOffice (не только моделью) - см. ниже.
 
 **Важное ограничение (см. `KNOWN_ISSUES.md` №11):** это ПРОВЕРКА АЛГОРИТМА на Python-
 эквиваленте, написанном и поддерживаемом вручную в синхронизации с Basic-кодом. Если
 Basic-версия в `PRIME_04_Posting.bas` изменится без обновления этой модели, тест продолжит
 проходить, но будет проверять уже не то, что реально исполняется. Это НЕ интеграционный тест
 и НЕ доказательство того, что реальный StarBasic-код при реальном исполнении ведёт себя так же.
+
+**Исключение (2.0.1):** `PRIME_ParseFlexibleDate` и `PRIME_Orders_RecomputeStatus` ДОПОЛНИТЕЛЬНО
+проверены прямым вызовом в реальном headless LibreOffice (не через кнопку/UI-цепочку, а
+напрямую по имени функции, в обход ненадёжного в этой среде `CurrentController` - см. Слой 5) -
+все 5 сценариев статуса (Ожидается/Частично получено/Получено/Просрочено/ручное "Отменено") и
+6 форматов даты дали правильный результат при реальном исполнении. Это не отменяет общего
+ограничения Слоя 5 для UI-цепочек (кнопка → PRIME_Orders_ConductRow → CurrentController), но
+для этих двух конкретных функций - это подтверждённое рантайм-поведение, не только модель.
+При разработке этой прямой проверки был найден и исправлен реальный дефект: `PRIME_ParseFlexibleDate`
+изначально падал на `parts(2)` вне границ массива из-за отсутствия короткого замыкания у `And`
+в StarBasic - баг существовал ровно до первого прямого runtime-вызова и не был бы найден ни
+статическим анализом, ни Python-моделью.
 
 ## Слой 5 — `tests/functional_smoke.py` (задумывался как CI job `prime-libreoffice-linux-smoke`)
 

@@ -47,10 +47,12 @@ Public Sub PRIME_OnContentChanged_Orders(ByVal oRangeAddr As Variant)
     oSheet = PRIME_GetSheet(SH_ORDERS)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_ORDERS)
-    Dim colCode As Long, colFact As Long, colState As Long
+    Dim colCode As Long, colFact As Long, colState As Long, colExpected As Long, colOrdered As Long
     colCode = PRIME_ColIndex(headers, "Код товара")
     colFact = PRIME_ColIndex(headers, "Факт. количество")
     colState = PRIME_ColIndex(headers, "_PRIME_State")
+    colExpected = PRIME_ColIndex(headers, "Ожидаемая дата")
+    colOrdered = PRIME_ColIndex(headers, "Количество")
 
     Dim r As Long, c As Long
     For r = oRangeAddr.StartRow To oRangeAddr.EndRow
@@ -60,6 +62,21 @@ Public Sub PRIME_OnContentChanged_Orders(ByVal oRangeAddr As Variant)
                     PRIME_Orders_AutofillByCode(oSheet, headers, r)
                 ElseIf c = colFact And colState >= 0 Then
                     PRIME_Orders_TrackPendingDelivery(oSheet, headers, r)
+                ElseIf c = colExpected Then
+                    ' dates support (recommendation §38): нормализуем гибкий пользовательский
+                    ' ввод даты в "YYYY-MM-DD" - нераспознанный формат оставляем как есть.
+                    Dim rawExpected As String
+                    rawExpected = Trim(oSheet.getCellByPosition(colExpected, r).getString())
+                    If rawExpected <> "" Then
+                        Dim parsed As String
+                        parsed = PRIME_ParseFlexibleDate(rawExpected)
+                        If parsed <> "" And parsed <> rawExpected Then
+                            oSheet.getCellByPosition(colExpected, r).setString(parsed)
+                        End If
+                    End If
+                    PRIME_Orders_RecomputeStatus(oSheet, headers, r)
+                ElseIf c = colOrdered Then
+                    PRIME_Orders_RecomputeStatus(oSheet, headers, r)
                 End If
             Next c
         End If
@@ -67,6 +84,60 @@ Public Sub PRIME_OnContentChanged_Orders(ByVal oRangeAddr As Variant)
 
 CleanExit:
     PRIME_EventLeave()
+End Sub
+
+' order_status_logic (recommendation §14/§38): пересчитывает "Статус" по остатку/датам.
+' "Отменено" - единственный статус, который эта функция никогда не перезаписывает (ручное
+' решение пользователя, аналогично do_not_overwrite_non_empty_user_fields).
+Public Sub PRIME_Orders_RecomputeStatus(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    Dim colStatus As Long
+    colStatus = PRIME_ColIndex(headers, "Статус")
+    If colStatus < 0 Then Exit Sub
+
+    Dim currentStatus As String
+    currentStatus = Trim(oSheet.getCellByPosition(colStatus, row).getString())
+    If currentStatus = ORDER_STATUS_CANCELLED Then Exit Sub
+
+    Dim colOrdered As Long, colReceived As Long, colExpected As Long
+    colOrdered = PRIME_ColIndex(headers, "Количество")
+    colReceived = PRIME_ColIndex(headers, "Получено всего")
+    colExpected = PRIME_ColIndex(headers, "Ожидаемая дата")
+
+    Dim orderedStr As String
+    orderedStr = Trim(oSheet.getCellByPosition(colOrdered, row).getString())
+    If orderedStr = "" Or Not IsNumeric(orderedStr) Then
+        If currentStatus = "" Then oSheet.getCellByPosition(colStatus, row).setString(ORDER_STATUS_DRAFT)
+        Exit Sub
+    End If
+
+    Dim receivedStr As String
+    receivedStr = ""
+    If colReceived >= 0 Then receivedStr = Trim(oSheet.getCellByPosition(colReceived, row).getString())
+    Dim ordered As Double, received As Double
+    ordered = CDbl(orderedStr)
+    received = 0
+    If receivedStr <> "" And IsNumeric(receivedStr) Then received = CDbl(receivedStr)
+
+    Dim newStatus As String
+    If received > 0 And received >= ordered - 0.0000005 Then
+        newStatus = ORDER_STATUS_RECEIVED
+    ElseIf received > 0 Then
+        newStatus = ORDER_STATUS_PARTIAL
+    Else
+        newStatus = ORDER_STATUS_EXPECTED
+    End If
+
+    ' Полностью полученный заказ никогда не становится просроченным; пустая ожидаемая дата
+    ' не создаёт просрочку (обе явно оговорены в order_status_logic.rules).
+    If newStatus <> ORDER_STATUS_RECEIVED And colExpected >= 0 Then
+        Dim expectedStr As String
+        expectedStr = Trim(oSheet.getCellByPosition(colExpected, row).getString())
+        If expectedStr <> "" And expectedStr < Format(Now, "YYYY-MM-DD") Then
+            newStatus = ORDER_STATUS_OVERDUE
+        End If
+    End If
+
+    oSheet.getCellByPosition(colStatus, row).setString(newStatus)
 End Sub
 
 ' Ввод внутреннего кода - точечный lookup по memory index, без сканирования всего листа
@@ -307,6 +378,7 @@ Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
 
     oSheet.getCellByPosition(PRIME_ColIndex(headers, "Факт. количество"), row).setString("")
     oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_State"), row).setString("")
+    PRIME_Orders_RecomputeStatus(oSheet, headers, row)
 
     MsgBox "Проведено: " & docId
 End Sub
@@ -384,9 +456,16 @@ Public Sub PRIME_Orders_DeleteDraftButton()
     colReceived = PRIME_ColIndex(headers, "Получено всего")
     Dim receivedStr As String
     receivedStr = Trim(oSheet.getCellByPosition(colReceived, row).getString())
-    If receivedStr <> "" And CDbl(receivedStr) > 0 Then
-        MsgBox "По этой позиции уже есть проведённые поставки. Удаление черновика запрещено - используйте корректировку."
-        Exit Sub
+    ' 2.0.1: было "receivedStr <> "" And CDbl(receivedStr) > 0" - StarBasic не короткозамыкает
+    ' And, поэтому CDbl(receivedStr) выполнялся ВСЕГДА, включая случай пустой строки, вызывая
+    ' крах ("Type mismatch") при удалении черновика с ещё не заполненным "Получено всего".
+    If receivedStr <> "" Then
+        If IsNumeric(receivedStr) Then
+            If CDbl(receivedStr) > 0 Then
+                MsgBox "По этой позиции уже есть проведённые поставки. Удаление черновика запрещено - используйте корректировку."
+                Exit Sub
+            End If
+        End If
     End If
 
     oSheet.getRows().removeByIndex(row, 1)
