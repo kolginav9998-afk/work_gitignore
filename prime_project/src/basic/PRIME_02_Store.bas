@@ -12,6 +12,7 @@ Option Explicit
 ' типа Collection (компилируется только "As New Collection" или "As Object" + Set при инициализации).
 Private gHeaderCache As Object      ' Collection: имя листа -> Variant(массив заголовков)
 Private gCommittedKeyCache As Object ' Collection: SOURCE_KEY -> DOC_ID, только для COMMITTED
+Private gCommittedOpIdCache As Object ' Collection: OP_ID -> True, только для COMMITTED (committed_only_stock)
 
 Private Function PRIME_Doc() As Object
     PRIME_Doc = ThisComponent
@@ -30,21 +31,19 @@ Public Function PRIME_SheetExists(ByVal sheetName As String) As Boolean
     PRIME_SheetExists = PRIME_Doc().getSheets().hasByName(sheetName)
 End Function
 
-' Последняя фактически использованная строка (0-based), -1 если лист пуст (только заголовок или ничего).
+' Последняя фактически использованная строка данных (0-based), headerRow-1 если данных нет
+' (см. PRIME_FormSchemaHeaderRow - header_schema_registry: заголовок не всегда в строке 0).
 Public Function PRIME_FindLastRow(ByVal oSheet As Object) As Long
+    Dim headerRow As Long
+    headerRow = PRIME_FormSchemaHeaderRow(oSheet.Name)
     Dim oCursor As Object
     oCursor = oSheet.createCursor()
     oCursor.gotoEndOfUsedArea(False)
     Dim lastRow As Long
     lastRow = oCursor.RangeAddress.EndRow
-    ' Пустой лист без данных: используемая область может быть единственной ячейкой A1 пустой
-    If lastRow = 0 Then
-        Dim v As Variant
-        v = oSheet.getCellByPosition(0, 0).getString()
-        If v = "" Then
-            PRIME_FindLastRow = -1
-            Exit Function
-        End If
+    If lastRow <= headerRow Then
+        PRIME_FindLastRow = headerRow - 1 ' нет строк данных
+        Exit Function
     End If
     PRIME_FindLastRow = lastRow
 End Function
@@ -75,8 +74,10 @@ Public Function PRIME_HeaderMap(ByVal sheetName As String) As Variant
     lastCol = PRIME_FindLastCol(oSheet)
     If lastCol < 0 Then lastCol = 0
 
+    Dim headerRow As Long
+    headerRow = PRIME_FormSchemaHeaderRow(sheetName)
     Dim oRange As Object
-    oRange = oSheet.getCellRangeByPosition(0, 0, lastCol, 0)
+    oRange = oSheet.getCellRangeByPosition(0, headerRow, lastCol, headerRow)
     Dim data As Variant
     data = oRange.getDataArray()
 
@@ -108,20 +109,27 @@ Public Function PRIME_ColIndex(ByVal headers As Variant, ByVal columnName As Str
     PRIME_ColIndex = -1
 End Function
 
-' Читает весь лист (включая заголовок в строке 0) одним getDataArray.
+' Читает весь лист начиная с реальной строки заголовка (header_schema_registry) одним
+' getDataArray. Возвращаемый массив ВСЕГДА 0-индексирован относительно заголовка: table(0) -
+' заголовок, table(1..) - данные, независимо от физической строки на листе - весь остальной
+' код (PRIME_FindRowByKey, циклы "For i = 1 To UBound(table)") работает с этим массивом, а не
+' с физическими номерами строк, и поэтому не меняется при разных HeaderRow у разных листов.
 Public Function PRIME_ReadTable(ByVal sheetName As String) As Variant
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(sheetName)
+    Dim headerRow As Long
+    headerRow = PRIME_FormSchemaHeaderRow(sheetName)
     Dim lastRow As Long, lastCol As Long
     lastRow = PRIME_FindLastRow(oSheet)
     lastCol = PRIME_FindLastCol(oSheet)
-    If lastRow < 0 Then
+    If lastCol < 0 Then lastCol = 0
+    If lastRow < headerRow Then
         Dim empty1(0) As Variant
         PRIME_ReadTable = empty1
         Exit Function
     End If
     Dim oRange As Object
-    oRange = oSheet.getCellRangeByPosition(0, 0, lastCol, lastRow)
+    oRange = oSheet.getCellRangeByPosition(0, headerRow, lastCol, lastRow)
     PRIME_ReadTable = oRange.getDataArray()
 End Function
 
@@ -137,19 +145,22 @@ Public Sub PRIME_AppendRowsBatch(ByVal sheetName As String, ByVal rows As Varian
 
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(sheetName)
+    Dim firstDataRow As Long
+    firstDataRow = PRIME_FormSchemaFirstDataRow(sheetName)
     Dim startRow As Long
     startRow = PRIME_FindLastRow(oSheet) + 1
-    If startRow < 1 Then startRow = 1 ' строка 0 - всегда заголовок
+    If startRow < firstDataRow Then startRow = firstDataRow ' никогда не писать поверх заголовка/панели
 
     Dim oRange As Object
     oRange = oSheet.getCellRangeByPosition(0, startRow, colCount - 1, startRow + rowCount - 1)
     oRange.setDataArray(rows)
 End Sub
 
-' Перезаписывает существующие строки, начиная с startRow (0-based, включая возможность
-' перезаписи строки заголовка при явном намерении - вызывающий отвечает за startRow >= 1
-' для обычных данных).
-Public Sub PRIME_UpdateRowsBatch(ByVal sheetName As String, ByVal startRow As Long, ByVal rows As Variant)
+' Перезаписывает существующие строки ТАБЛИЦЫ (как её возвращает PRIME_ReadTable), начиная с
+' tableRowIndex - 0-based индекс ВНУТРИ массива table (не физический номер строки листа!),
+' обычно результат PRIME_FindRowByKey. Сама функция переводит его в физическую строку через
+' header_schema_registry - вызывающему коду не нужно знать реальный HeaderRow листа.
+Public Sub PRIME_UpdateRowsBatch(ByVal sheetName As String, ByVal tableRowIndex As Long, ByVal rows As Variant)
     Dim rowCount As Long
     rowCount = UBound(rows) - LBound(rows) + 1
     If rowCount <= 0 Then Exit Sub
@@ -158,9 +169,24 @@ Public Sub PRIME_UpdateRowsBatch(ByVal sheetName As String, ByVal startRow As Lo
 
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(sheetName)
+    Dim physicalStartRow As Long
+    physicalStartRow = PRIME_FormSchemaHeaderRow(sheetName) + tableRowIndex
+
     Dim oRange As Object
-    oRange = oSheet.getCellRangeByPosition(0, startRow, colCount - 1, startRow + rowCount - 1)
+    oRange = oSheet.getCellRangeByPosition(0, physicalStartRow, colCount - 1, physicalStartRow + rowCount - 1)
     oRange.setDataArray(rows)
+End Sub
+
+' Очищает только строки данных (firstDataRow..lastRow), не трогая заголовок/декоративную
+' панель над ним - общая замена разбросанных по коду "clearContents от строки 1".
+Public Sub PRIME_ClearDataRows(ByVal oSheet As Object, ByVal headers As Variant)
+    Dim lastRow As Long
+    lastRow = PRIME_FindLastRow(oSheet)
+    Dim firstDataRow As Long
+    firstDataRow = PRIME_FormSchemaFirstDataRow(oSheet.Name)
+    If lastRow >= firstDataRow Then
+        oSheet.getCellRangeByPosition(0, firstDataRow, UBound(headers), lastRow).clearContents(1023)
+    End If
 End Sub
 
 ' Линейный поиск по значению колонки (для системных справочников умеренного размера:
@@ -182,8 +208,14 @@ End Function
 ' Инвалидируется при каждом успешном commit (PRIME_RegisterCommittedKey) и может быть
 ' полностью перестроен PRIME_RebuildCommittedKeyCache при открытии документа.
 
+' Строит ОБА кэша (SOURCE_KEY->DOC_ID и OP_ID->True) одним проходом по SYS_PRIME_TX -
+' committed_only_stock (2.0.1): PRIME_LotBalance/PRIME_StockByLocation обязаны считать
+' только движения, чей OP_ID реально COMMITTED, иначе PREPARED/FAILED-движения (которые
+' физически уже могли быть дописаны в DB_PRIME_MOVEMENTS до сбоя после записи PREPARED,
+' см. PRIME_04_Posting.PRIME_PostDocument) ошибочно влияли бы на остаток.
 Public Sub PRIME_RebuildCommittedKeyCache()
     Set gCommittedKeyCache = New Collection
+    Set gCommittedOpIdCache = New Collection
     If Not PRIME_SheetExists(SH_SYS_TX) Then Exit Sub
 
     Dim tx As Variant
@@ -192,10 +224,11 @@ Public Sub PRIME_RebuildCommittedKeyCache()
 
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_SYS_TX)
-    Dim colSourceKey As Long, colDocId As Long, colState As Long
+    Dim colSourceKey As Long, colDocId As Long, colState As Long, colOpId As Long
     colSourceKey = PRIME_ColIndex(headers, "SOURCE_KEY")
     colDocId = PRIME_ColIndex(headers, "DOC_ID")
     colState = PRIME_ColIndex(headers, "STATE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
 
     Dim i As Long
     For i = 1 To UBound(tx)
@@ -204,6 +237,11 @@ Public Sub PRIME_RebuildCommittedKeyCache()
             k = CStr(tx(i)(colSourceKey))
             If Not PRIME_CollectionHasKey(gCommittedKeyCache, k) Then
                 gCommittedKeyCache.Add(CStr(tx(i)(colDocId)), k)
+            End If
+            Dim opId As String
+            opId = CStr(tx(i)(colOpId))
+            If Not PRIME_CollectionHasKey(gCommittedOpIdCache, opId) Then
+                gCommittedOpIdCache.Add(True, opId)
             End If
         End If
     Next i
@@ -230,6 +268,26 @@ Public Sub PRIME_RegisterCommittedKey(ByVal sourceKey As String, ByVal docId As 
         gCommittedKeyCache.Add(docId, sourceKey)
     End If
 End Sub
+
+' transaction_cache_store_consistency (2.0.1): вызывается, когда COMMITTED уже был выставлен
+' и SOURCE_KEY уже зарегистрирован здесь, но последующий ThisComponent.store() всё же
+' провалился и TX откатывается на FAILED (см. PRIME_PostDocument.PostFailed) - без этого
+' отката повторная попытка того же SOURCE_KEY ошибочно получила бы ответ "уже проведено",
+' хотя реально проведённая операция была помечена как FAILED.
+Public Sub PRIME_UnregisterCommittedKey(ByVal sourceKey As String)
+    If gCommittedKeyCache Is Nothing Then Exit Sub
+    On Error Resume Next
+    gCommittedKeyCache.Remove(sourceKey)
+    On Error Goto 0
+End Sub
+
+' committed_only_stock: True, только если этот OP_ID зафиксирован как COMMITTED в SYS_PRIME_TX.
+Public Function PRIME_IsOpIdCommitted(ByVal opId As String) As Boolean
+    If gCommittedOpIdCache Is Nothing Then
+        PRIME_RebuildCommittedKeyCache()
+    End If
+    PRIME_IsOpIdCommitted = PRIME_CollectionHasKey(gCommittedOpIdCache, opId)
+End Function
 
 ' --- Générique: следующий номер последовательности (SYS_PRIME_SEQ), пакетно безопасно ---
 Public Function PRIME_SequenceNext(ByVal seqName As String) As Long

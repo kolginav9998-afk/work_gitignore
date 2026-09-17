@@ -66,9 +66,11 @@ Public Sub PRIME_OnContentChanged_Workflow(ByVal oRangeAddr As Variant)
     colCode = PRIME_ColIndex(headers, "Внутренний код")
     If colCode < 0 Then GoTo CleanExit
 
+    Dim firstDataRow As Long
+    firstDataRow = PRIME_FormSchemaFirstDataRow(sheetName)
     Dim r As Long, c As Long
     For r = oRangeAddr.StartRow To oRangeAddr.EndRow
-        If r >= 1 Then
+        If r >= firstDataRow Then
             For c = oRangeAddr.StartColumn To oRangeAddr.EndColumn
                 If c = colCode Then
                     PRIME_Workflow_AutofillByCode(oSheet, headers, r)
@@ -105,7 +107,7 @@ Public Sub PRIME_Workflow_ConductRowButton()
     oSel = ThisComponent.CurrentSelection
     Dim row As Long
     row = oSel.RangeAddress.StartRow
-    If row < 1 Then Exit Sub
+    If row < PRIME_FormSchemaFirstDataRow(oSheet.Name) Then Exit Sub
     PRIME_Workflow_ConductRow(oSheet, row)
 End Sub
 
@@ -119,7 +121,7 @@ Public Sub PRIME_Workflow_ConductAllButton()
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
     Dim r As Long
-    For r = 1 To lastRow
+    For r = PRIME_FormSchemaFirstDataRow(oSheet.Name) To lastRow
         If Trim(oSheet.getCellByPosition(colCode, r).getString()) <> "" Then
             PRIME_Workflow_ConductRow(oSheet, r)
         End If
@@ -196,11 +198,16 @@ Public Sub PRIME_Workflow_FillArticleButton()
     headers = PRIME_HeaderMap(oSheet.Name)
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
+    Dim firstDataRow As Long
+    firstDataRow = PRIME_FormSchemaFirstDataRow(oSheet.Name)
+    Dim processed As Long
+    processed = 0
     Dim r As Long
-    For r = 1 To lastRow
+    For r = firstDataRow To lastRow
         PRIME_Workflow_AutofillByCode(oSheet, headers, r)
+        processed = processed + 1
     Next r
-    MsgBox "Автозаполнение выполнено для " & lastRow & " строк."
+    MsgBox "Автозаполнение выполнено для " & processed & " строк."
 End Sub
 
 ' "Повторить значения" - копирует общие поля (Место хранения/Кто сдал/Кому/Документ) из
@@ -214,7 +221,7 @@ Public Sub PRIME_Workflow_RepeatFieldsButton()
     oSel = ThisComponent.CurrentSelection
     Dim row As Long
     row = oSel.RangeAddress.StartRow
-    If row < 2 Then Exit Sub
+    If row < PRIME_FormSchemaFirstDataRow(oSheet.Name) + 1 Then Exit Sub ' нужна предыдущая строка данных
 
     Dim repeatCols As Variant
     repeatCols = Array("Место хранения", "Кто сдал", "Кому", "Документ")

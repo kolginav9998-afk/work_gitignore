@@ -9,7 +9,7 @@ Option Explicit
 ' PRIME 2.0.0 (см. known_limitations в финальном отчёте) - вместо тихого отказа или ошибки
 ' обращения к несуществующей Firebird-базе, пользователь получает понятное объяснение.
 Public Sub PRIME_UI_NotImplementedStub()
-    MsgBox "Эта функция версии 1.4.1 не перенесена в первый стабильный релиз PRIME 2.0.0." & Chr(10) & _
+    MsgBox "Эта функция версии 1.4.1 не перенесена в PRIME " & PRIME_SCHEMA_VERSION & "." & Chr(10) & _
         "См. CHANGELOG_PRIME.md / TEST_REPORT.md, раздел ""Известные ограничения""."
 End Sub
 
@@ -59,6 +59,37 @@ End Sub
 Public Sub PRIME_UI_RestoreInterfaceSilent()
     PRIME_UI_ApplySheetVisibility()
     PRIME_UI_ApplyFreezeAndFilters()
+    PRIME_UI_FixInfoPanelText()
+End Sub
+
+' remove_text_references (PRIME 2.0.1): лист "Инфо" унаследован от шаблона 1.4.1 со статическим
+' текстом ("Режим: PRODUCTION", "Релиз: 2.0.0", "Firebird: OK - embedded Firebird"), который
+' никогда не обновлялся ни одним PRIME-модулем - после первой сборки 2.0.0 он навсегда оставался
+' неверным (в частности, прямо утверждал зависимость от Firebird, которой в PRIME нет). Правим
+' по совпадению подписи в колонке A, чтобы не сломаться, если раскладка панели когда-то изменится.
+' Optional-с-значением-по-умолчанию (VBA-style) не компилируется в этой версии StarBasic -
+' молча ломает компиляцию ВСЕЙ библиотеки Standard без видимого исключения (тот же класс
+' проблемы, что и другие недокументированные ограничения StarBasic, см. историю отладки) -
+' поэтому здесь просто константа, а не Optional-параметр.
+Private Const PRIME_INFO_PANEL_MAX_ROW As Long = 20
+
+Private Sub PRIME_UI_FixInfoPanelText()
+    If Not PRIME_SheetExists(SH_INFO) Then Exit Sub
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(SH_INFO)
+
+    Dim r As Long
+    For r = 0 To PRIME_INFO_PANEL_MAX_ROW
+        Dim label As String
+        label = Trim(oSheet.getCellByPosition(0, r).getString())
+        Select Case label
+            Case "Релиз"
+                oSheet.getCellByPosition(1, r).setString(PRIME_SCHEMA_VERSION)
+            Case "Firebird"
+                oSheet.getCellByPosition(0, r).setString("Хранилище")
+                oSheet.getCellByPosition(1, r).setString("Calc-only, без Firebird/Base")
+        End Select
+    Next r
 End Sub
 
 Private Sub PRIME_UI_ApplySheetVisibility()
@@ -100,16 +131,22 @@ Private Sub PRIME_UI_ApplyFreezeAndFilters()
             Dim oSh As Object
             oSh = PRIME_GetSheet(dataSheets(i))
 
+            Dim headerRow As Long, firstDataRow As Long
+            headerRow = PRIME_FormSchemaHeaderRow(dataSheets(i))
+            firstDataRow = headerRow + 1
+
             oController.setActiveSheet(oSh)
-            oController.freezeAtPosition(0, 1) ' заморозить строку заголовка (freeze_headers)
+            ' Заморозить всё до и включая строку заголовка (freeze_headers) - для листов с
+            ' декоративной панелью над таблицей (header_schema_registry) это не всегда строка 1.
+            oController.freezeAtPosition(0, firstDataRow)
 
             Dim lastRow As Long, lastCol As Long
             lastRow = PRIME_FindLastRow(oSh)
             lastCol = PRIME_FindLastCol(oSh)
-            If lastRow < 1 Then lastRow = 1
+            If lastRow < headerRow Then lastRow = headerRow
 
             Dim oRange As Object
-            oRange = oSh.getCellRangeByPosition(0, 0, lastCol, lastRow)
+            oRange = oSh.getCellRangeByPosition(0, headerRow, lastCol, lastRow)
 
             ' Автофильтр (autofilter=true) через именованный диапазон базы данных.
             Dim rangeName As String

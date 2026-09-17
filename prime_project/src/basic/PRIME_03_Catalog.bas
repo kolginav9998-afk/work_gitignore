@@ -266,6 +266,9 @@ End Function
 ' Остаток товара по местам хранения, посчитанный из COMMITTED-движений (DB_PRIME_MOVEMENTS).
 ' Заполняет параллельные массивы locations()/quantities() - Collection в StarBasic не отдаёт
 ' свои ключи обратно, поэтому агрегация ведётся через явные массивы, а не через Collection.
+' committed_only_stock (2.0.1): фильтр по PRIME_IsOpIdCommitted - см. комментарий у
+' PRIME_04_Posting.PRIME_LotBalance, здесь та же независимая реализация суммирования по
+' движениям, поэтому фильтр нужно было продублировать отдельно.
 Public Sub PRIME_StockByLocation(ByVal productCode As String, ByRef locations() As String, ByRef quantities() As Double)
     Dim locCount As Long
     locCount = 0
@@ -278,10 +281,11 @@ Public Sub PRIME_StockByLocation(ByVal productCode As String, ByRef locations() 
 
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colProduct As Long, colLoc As Long, colQty As Long
+    Dim colProduct As Long, colLoc As Long, colQty As Long, colOpId As Long
     colProduct = PRIME_ColIndex(headers, "PRODUCT_CODE")
     colLoc = PRIME_ColIndex(headers, "LOCATION")
     colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
 
     Dim table As Variant
     table = PRIME_ReadTable(SH_DB_MOVEMENTS)
@@ -296,7 +300,7 @@ Public Sub PRIME_StockByLocation(ByVal productCode As String, ByRef locations() 
 
     Dim i As Long, j As Long, foundIdx As Long
     For i = 1 To UBound(table)
-        If CStr(table(i)(colProduct)) = productCode Then
+        If CStr(table(i)(colProduct)) = productCode And PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
             Dim loc As String
             loc = CStr(table(i)(colLoc))
             foundIdx = -1

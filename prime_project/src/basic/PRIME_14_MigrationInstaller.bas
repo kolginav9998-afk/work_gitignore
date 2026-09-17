@@ -185,6 +185,151 @@ Public Sub PRIME_Install_DisableLegacyEvents()
     Next i
 End Sub
 
+' === Миграция колонок бизнес-листов, унаследованных от 1.4.1 (issues_migration, PRIME 2.0.1) ===
+' Дефект 2.0.0: PRIME_Install_EnsureBusinessSheet создаёт целевую раскладку колонок ТОЛЬКО для
+' листа, которого ещё не существует - но почти все бизнес-листы (Выдачи и все 4 листа
+' Приход/Расход - Цех/Офис, Возвраты, Инвентаризация, Остаток, Остаток - Заказы, База - Поиск)
+' УЖЕ существуют в шаблоне 1.4.1 (с декоративной "шапкой" и/или легаси _WMS_*-колонками), из-за
+' чего EnsureBusinessSheet молча ничего для них не делает - все эти листы оставались на исходной
+' раскладке 1.4.1, а не на PRIME_*Columns() схеме, которую ожидает остальной код. Единственный
+' лист, для которого это было явно исправлено в 2.0.0 - "Заказы" (PRIME_Migration_MigrateOrdersSheet).
+' Эта функция - универсальная замена: приводит УЖЕ существующий лист к целевому набору колонок,
+' перенося данные ПО ИМЕНИ колонки (колонки без соответствия в целевой схеме, включая любые
+' легаси _WMS_*-поля, не переносятся - non_negotiable_architecture.legacy_code_allowed_in_production_ods=false).
+' Идемпотентна: если текущий заголовок уже точно совпадает с целевым - не трогает лист.
+Public Function PRIME_Migration_MigrateBusinessSheetColumns(ByVal sheetName As String, ByVal targetColumns As Variant) As Boolean
+    If Not PRIME_SheetExists(sheetName) Then
+        PRIME_Migration_MigrateBusinessSheetColumns = False
+        Exit Function
+    End If
+
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(sheetName)
+    Dim headerRow As Long
+    headerRow = PRIME_FormSchemaHeaderRow(sheetName)
+
+    Dim targetCount As Long
+    targetCount = UBound(targetColumns) - LBound(targetColumns) + 1
+
+    Dim lastCol As Long
+    lastCol = PRIME_FindLastCol(oSheet)
+    Dim oldHeaders() As String
+    If lastCol >= 0 Then
+        Dim headerData As Variant
+        headerData = oSheet.getCellRangeByPosition(0, headerRow, lastCol, headerRow).getDataArray()
+        ReDim oldHeaders(lastCol)
+        Dim hc As Long
+        For hc = 0 To lastCol
+            oldHeaders(hc) = CStr(headerData(0)(hc))
+        Next hc
+    Else
+        ReDim oldHeaders(-1)
+    End If
+
+    ' Уже мигрировано (точное совпадение имени и порядка колонок) - ничего не делаем, чтобы
+    ' повторный запуск сборки/миграции не тёр уже введённые пользователем данные.
+    Dim alreadyMigrated As Boolean
+    alreadyMigrated = (UBound(oldHeaders) - LBound(oldHeaders) + 1 = targetCount)
+    If alreadyMigrated Then
+        Dim tc As Long
+        For tc = 0 To targetCount - 1
+            If oldHeaders(tc) <> CStr(targetColumns(LBound(targetColumns) + tc)) Then
+                alreadyMigrated = False
+                Exit For
+            End If
+        Next tc
+    End If
+    If alreadyMigrated Then
+        PRIME_Migration_MigrateBusinessSheetColumns = False
+        Exit Function
+    End If
+
+    Dim oldLastRow As Long
+    oldLastRow = PRIME_FindLastRow(oSheet) ' по ТЕКУЩЕМУ headerRow - вызывается до перезаписи
+    Dim oldDataRowCount As Long
+    oldDataRowCount = oldLastRow - headerRow ' может быть <= 0, если данных ещё нет
+
+    Dim totalNewRows As Long
+    totalNewRows = 1 ' заголовок
+    If oldDataRowCount > 0 Then totalNewRows = totalNewRows + oldDataRowCount
+
+    Dim newTable(totalNewRows - 1) As Variant
+    Dim headerOut(targetCount - 1) As Variant
+    Dim i As Long
+    For i = 0 To targetCount - 1
+        headerOut(i) = targetColumns(LBound(targetColumns) + i)
+    Next i
+    newTable(0) = headerOut
+
+    If oldDataRowCount > 0 Then
+        Dim oldDataRange As Variant
+        oldDataRange = oSheet.getCellRangeByPosition(0, headerRow, lastCol, oldLastRow).getDataArray()
+        Dim r As Long
+        For r = 1 To oldDataRowCount
+            Dim newRow(targetCount - 1) As Variant
+            Dim c As Long
+            For c = 0 To targetCount - 1
+                Dim colName As String
+                colName = CStr(targetColumns(LBound(targetColumns) + c))
+                Dim oldIdx As Long
+                oldIdx = PRIME_Migration_IndexOfName(oldHeaders, colName)
+                If oldIdx >= 0 Then
+                    newRow(c) = oldDataRange(r)(oldIdx)
+                Else
+                    newRow(c) = ""
+                End If
+            Next c
+            newTable(r) = newRow
+        Next r
+    End If
+
+    ' Очищаем максимум старой/новой области, затем пишем целевую раскладку одним батчем.
+    Dim clearLastCol As Long
+    clearLastCol = lastCol
+    If targetCount - 1 > clearLastCol Then clearLastCol = targetCount - 1
+    Dim clearLastRow As Long
+    clearLastRow = oldLastRow
+    If headerRow + totalNewRows - 1 > clearLastRow Then clearLastRow = headerRow + totalNewRows - 1
+    If clearLastCol >= 0 And clearLastRow >= headerRow Then
+        oSheet.getCellRangeByPosition(0, headerRow, clearLastCol, clearLastRow).clearContents(1023)
+    End If
+    oSheet.getCellRangeByPosition(0, headerRow, targetCount - 1, headerRow + totalNewRows - 1).setDataArray(newTable)
+
+    PRIME_InvalidateHeaderCache(sheetName)
+    PRIME_Migration_MigrateBusinessSheetColumns = True
+End Function
+
+Private Function PRIME_Migration_IndexOfName(ByVal names() As String, ByVal target As String) As Long
+    If UBound(names) < LBound(names) Then
+        PRIME_Migration_IndexOfName = -1
+        Exit Function
+    End If
+    Dim i As Long
+    For i = LBound(names) To UBound(names)
+        If names(i) = target Then
+            PRIME_Migration_IndexOfName = i
+            Exit Function
+        End If
+    Next i
+    PRIME_Migration_IndexOfName = -1
+End Function
+
+' Вызывает миграцию колонок для КАЖДОГО бизнес-листа, для которого PRIME_Install_EnsureBusinessSheet
+' не гарантирует целевую раскладку (см. комментарий выше) - "Заказы" сюда не входит, у неё
+' отдельная, более сложная миграция (PRIME_Migration_MigrateOrdersSheet, генерирует ЕИ-коды).
+Public Sub PRIME_Migration_MigrateAllBusinessSheets()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUES, PRIME_ArrayConcat(PRIME_IssuesColumns(), PRIME_IssuesHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_SHOP, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_SHOP, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RETURNS, PRIME_ArrayConcat(PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_INVENTORY, PRIME_InventoryColumns()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_STOCK, PRIME_StockColumns()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_STOCK_ORDERS, PRIME_StockOrdersColumns()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_SEARCH, PRIME_SearchColumns()
+End Sub
+
 ' === Миграция 1.4.1 -> 2.0.0 =====================================================================
 ' Zero-arg, no-dialog вариант миграции для сборщика (tools/build_ods.py) и автоматических тестов -
 ' UNO script provider не умеет удобно принимать ByRef-массивы через invoke() извне, поэтому
@@ -211,6 +356,10 @@ End Sub
 ' (через PRIME_Install_EnsureAllBusinessSheetsSilent) - см. предупреждение выше.
 Public Sub PRIME_Build_MigrateSilent()
     PRIME_Install_DisableLegacyEvents()
+    ' Приводит Выдачи/workflow-листы/Возвраты/Инвентаризацию/Остаток/Поиск к целевой раскладке
+    ' ДО миграции "Заказы" - порядок не важен для корректности (независимые листы), но так
+    ' ошибки в одной миграции не маскируют результат другой при чтении лога.
+    PRIME_Migration_MigrateAllBusinessSheets()
     Dim oldCodes() As String
     Dim newCodes() As String
     Dim mapCount As Long
@@ -229,7 +378,7 @@ End Sub
 
 Public Sub PRIME_Migration_RunButton()
     Dim answer As Integer
-    answer = MsgBox("Выполнить миграцию 1.4.1 -> PRIME 2.0.0?" & Chr(10) & _
+    answer = MsgBox("Выполнить миграцию 1.4.1 -> PRIME " & PRIME_SCHEMA_VERSION & "?" & Chr(10) & _
         "Будет создана резервная копия перед началом. Действие затрагивает структуру листа ""Заказы"".", _
         MB_YESNO + MB_ICONQUESTION, "Миграция PRIME")
     If answer <> IDYES Then Exit Sub
@@ -243,6 +392,7 @@ Public Sub PRIME_Migration_RunButton()
 
     PRIME_Install_DisableLegacyEvents()
     PRIME_Install_EnsureSchema()
+    PRIME_Migration_MigrateAllBusinessSheets()
 
     Dim renameMap As Object
     Dim oldCodes() As String

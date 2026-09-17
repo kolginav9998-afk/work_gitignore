@@ -5,8 +5,8 @@ Option Explicit
 ' Никакой логики I/O здесь быть не должно (см. forbidden: очень крупные монолитные функции,
 ' циклические зависимости) - только константы и простые справочные функции.
 
-Public Const PRIME_SCHEMA_VERSION As String = "2.0.0"
-Public Const PRIME_BUILD_DATE As String = "2026-09-16"
+Public Const PRIME_SCHEMA_VERSION As String = "2.0.1"
+Public Const PRIME_BUILD_DATE As String = "2026-09-17"
 
 ' --- Системные (скрытые) листы ---
 Public Const SH_SYS_META As String = "SYS_PRIME_META"
@@ -52,6 +52,38 @@ Public Const SH_LEGACY_RECEIPT_PROD As String = "Приход — Произво
 Public Const SH_LEGACY_ISSUE_PROD As String = "Расход — Производство"
 Public Const SH_LEGACY_RECEIPT_PARTS As String = "Приход — Детали"
 Public Const SH_LEGACY_ISSUE_PARTS As String = "Расход — Детали"
+
+' --- Реестр схемы форм (header_schema_registry, PRIME 2.0.1) ---------------------------------
+' Устраняет дефект 2.0.0: код молча предполагал, что заголовок таблицы всегда в строке 0
+' (0-based). На деле большинство бизнес-листов унаследовали от шаблона 1.4.1 декоративную
+' "шапку" (название + описание + строка статуса) ПЕРЕД реальной строкой заголовка колонок -
+' у "Приход/Расход - Цех/Офис", "Возвраты", "Инвентаризация" заголовок физически в строке 4,
+' у "Остаток" и "База - Поиск" - в строке 5. PRIME_Install_EnsureBusinessSheet при этом молча
+' ничего не делает для уже существующих листов (сборка НЕ создаёт новый лист поверх старого),
+' поэтому весь низкоуровневый доступ (PRIME_02_Store) обязан спрашивать здесь, где на самом
+' деле искать заголовок конкретного листа, а не считать, что это всегда строка 0.
+' Изменение HeaderRow для листа, у которого уже есть реальные пользовательские данные,
+' требует соответствующей миграции (PRIME_14_MigrationInstaller) - само по себе изменение
+' этой функции данные не переносит.
+Public Function PRIME_FormSchemaHeaderRow(ByVal sheetName As String) As Long
+    Select Case sheetName
+        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, SH_RETURNS, SH_INVENTORY, SH_STOCK_ORDERS
+            PRIME_FormSchemaHeaderRow = 4
+        Case SH_STOCK, SH_SEARCH
+            PRIME_FormSchemaHeaderRow = 5
+        Case Else
+            ' Заказы, Выдачи, Комплекты, Остаток — Заказы, все SYS_PRIME_*/DB_PRIME_* -
+            ' заголовок в строке 0 (либо унаследовано от 1.4.1 без декоративной шапки,
+            ' либо лист создаётся PRIME с нуля).
+            PRIME_FormSchemaHeaderRow = 0
+    End Select
+End Function
+
+' Первая строка данных = сразу после строки заголовка. Единая точка, используемая вместо
+' разбросанных по коду "магических" 1/2 (header_schema_registry.rules).
+Public Function PRIME_FormSchemaFirstDataRow(ByVal sheetName As String) As Long
+    PRIME_FormSchemaFirstDataRow = PRIME_FormSchemaHeaderRow(sheetName) + 1
+End Function
 
 ' --- Идентичность товара ---
 Public Const PRODUCT_CODE_PREFIX As String = "ЕИ-"

@@ -35,18 +35,17 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 
     If Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then Exit Sub
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colProduct As Long, colLoc As Long, colQty As Long, colDate As Long
+    Dim colProduct As Long, colLoc As Long, colQty As Long, colDate As Long, colOpId As Long
     colProduct = PRIME_ColIndex(moveHeaders, "PRODUCT_CODE")
     colLoc = PRIME_ColIndex(moveHeaders, "LOCATION")
     colQty = PRIME_ColIndex(moveHeaders, "QTY_BASE")
     colDate = PRIME_ColIndex(moveHeaders, "MOVE_DATE")
+    colOpId = PRIME_ColIndex(moveHeaders, "OP_ID")
 
     Dim moveTable As Variant
     moveTable = PRIME_ReadTable(SH_DB_MOVEMENTS)
@@ -68,6 +67,9 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
         Dim pc As String, loc As String
         pc = CStr(moveTable(i)(colProduct))
         If filterMode = "CODE" And pc <> filterValue Then GoTo ContinueLoop
+        ' committed_only_stock (2.0.1): лист "Остаток" не должен показывать PREPARED/FAILED
+        ' движения как реальный остаток - см. PRIME_04_Posting.PRIME_LotBalance.
+        If Not PRIME_IsOpIdCommitted(CStr(moveTable(i)(colOpId))) Then GoTo ContinueLoop
         loc = CStr(moveTable(i)(colLoc))
         Dim k As String
         k = pc & "|" & loc
@@ -136,9 +138,7 @@ Public Sub PRIME_StockOrders_RefreshButton()
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 
     If Not PRIME_SheetExists(SH_DB_ORDER_SNAPSHOT) Then Exit Sub
     Dim snapHeaders As Variant
@@ -189,9 +189,7 @@ Public Sub PRIME_Stock_ShowLotsByCodeButton()
     headers = PRIME_HeaderMap(SH_SEARCH)
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 
     Dim lots() As String
     Dim balances() As Double
@@ -238,9 +236,7 @@ Public Sub PRIME_Search_ClearButton()
     headers = PRIME_HeaderMap(SH_SEARCH)
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 End Sub
 
 ' === База - Поиск ===============================================================================
@@ -265,9 +261,7 @@ Private Sub PRIME_Search_Execute(ByVal query As String)
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 
     If Not PRIME_SheetExists(SH_DB_DOC_LINES) Or Not PRIME_SheetExists(SH_DB_DOCUMENTS) Then Exit Sub
 

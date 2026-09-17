@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-PRIME 2.0.0 builder.
+PRIME 2.0.1 builder.
 
 Берёт шаблон ODS 1.4.1 (src/templates/POKATAK_WMS_1.4.1_template.ods), внедряет 15 модулей
-PRIME_*.bas в библиотеку Basic "Standard" (старые WMS_* модули остаются как архивный исходный
-код - legacy_modules_can_remain_as_archived_source, но отвязываются от кнопок/событий -
-legacy_modules_bound_to_runtime_ui=false), создаёт системные/бизнес-листы, привязывает лёгкие
+PRIME_*.bas в библиотеку Basic "Standard", затем УДАЛЯЕТ все 38 legacy WMS_*-модулей из
+собранного .ods (legacy_removal, PRIME 2.0.1: legacy_code_allowed_in_production_ods=false -
+архивная копия исходников хранится в git под legacy_reference/, а не в самом файле; в 2.0.0
+эти модули ошибочно оставались встроенными как "архив", только отвязанные от кнопок/событий),
+создаёт системные/бизнес-листы, привязывает лёгкие
 обработчики PRIME_OnContentChanged_* к событию листа "OnChange" (реальный ключ события в UNO,
 подтверждено через headless-исследование шаблона - НЕ "OnContentChanged"), перепривязывает
 кнопки на новые PRIME-макросы по явной карте (builder.actions: Update events, Update buttons),
@@ -27,6 +29,27 @@ from com.sun.star.script import ScriptEventDescriptor
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_BASIC_DIR = REPO_ROOT / "src" / "basic"
 DEFAULT_TEMPLATE = REPO_ROOT / "src" / "templates" / "POKATAK_WMS_1.4.1_template.ods"
+
+# legacy_removal (PRIME 2.0.1): все 38 WMS_* модулей 1.4.1, физически встроенные в шаблон -
+# в 2.0.0 они оставались в собранном .ods как "архивный исходный код", только отвязанные от
+# кнопок/событий (legacy_modules_bound_to_runtime_ui=false). Мастер-задание 2.0.1 требует
+# полностью убрать их из production .ods (legacy_code_allowed_in_production_ods=false) -
+# архивная копия исходников остаётся в репозитории под legacy_reference/ (git), не в самом
+# файле WMS. Список подтверждён построчной выгрузкой библиотеки "Standard" из шаблона
+# (см. tools/list_legacy_modules.py в истории отладки) - должен совпадать 1:1 с реально
+# встроенными модулями, иначе static_check_source.py/static_checks.py укажут на расхождение.
+LEGACY_MODULES_TO_REMOVE = [
+    "WMS_02_Orders_FINAL", "WMS_03_Issues_FINAL", "WMS_04_DB_Connection", "WMS_05_DB_Install",
+    "WMS_06_DB_Orders", "WMS_07_DB_Issues", "WMS_08_DB_Returns", "WMS_09_DB_Search",
+    "WMS_10_DB_Stock", "WMS_11_DB_UnitsLots", "WMS_12_DB_SmartReceipt", "WMS_13_SystemCenter",
+    "WMS_14_UniversalReceipt", "WMS_15_SafetyCore", "WMS_16_Acts", "WMS_17_ActIntegration",
+    "WMS_18_ActsRegistry", "WMS_19_ProductionUI", "WMS_20_ManualOperations", "WMS_21_Architecture",
+    "WMS_22_References", "WMS_23_ReturnsInventory", "WMS_24_GlobalSearch", "WMS_25_WorkflowActs",
+    "WMS_26_StabilityDiagnostics", "WMS_27_RuntimeCore", "WMS_28_DBEngine", "WMS_30_Integrity",
+    "WMS_31_UIEngine", "WMS_32_AdminReset", "WMS_33_OfflineExports", "WMS_34_ManagerReport",
+    "WMS_35_OrderExtras", "WMS_36_OrderImport", "WMS_37_PrimeUI", "WMS_38_Dashboard",
+    "WMS_99_Installer", "WMS_CORE_Common_FINAL",
+]
 
 PRIME_MODULES = [
     "PRIME_00_Config",
@@ -188,7 +211,20 @@ def script_uri(module_dot_sub: str) -> str:
     return f"vnd.sun.star.script:{module_dot_sub}?language=Basic&location=document"
 
 
+def kill_stale_soffice(profile_dir: Path):
+    # xvfb-run wraps soffice.bin in a shell, so proc.terminate() (which only signals the
+    # xvfb-run wrapper PID) does not reliably kill the actual soffice.bin child - it can be
+    # left running indefinitely, still holding the UserInstallation profile directory. A
+    # second build reusing the same fixed profile path then races that orphan and can fail
+    # opaquely at doc.store() with SfxBaseModel::storeSelf (observed empirically while
+    # developing 2.0.1 - not a code defect in the macros, but real enough to guard against
+    # in CI, where a retried step could hit the exact same collision).
+    subprocess.run(["pkill", "-9", "-f", f"soffice.bin.*{profile_dir}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def start_soffice(profile_dir: Path, port: int) -> subprocess.Popen:
+    kill_stale_soffice(profile_dir)
     if profile_dir.exists():
         shutil.rmtree(profile_dir)
     cmd = [
@@ -234,6 +270,22 @@ def inject_basic_modules(doc):
         else:
             lib.insertByName(module_name, source)
         print(f"  injected module {module_name} ({len(source)} bytes)")
+
+
+def remove_legacy_modules(doc):
+    libs = doc.BasicLibraries
+    lib = libs.getByName("Standard")
+    removed = 0
+    missing = []
+    for module_name in LEGACY_MODULES_TO_REMOVE:
+        if lib.hasByName(module_name):
+            lib.removeByName(module_name)
+            removed += 1
+        else:
+            missing.append(module_name)
+    print(f"  removed {removed}/{len(LEGACY_MODULES_TO_REMOVE)} legacy WMS_* modules")
+    if missing:
+        print(f"  NOTE: not found (already absent?): {missing}")
 
 
 def invoke_macro(doc, module_dot_sub: str, args=()):
@@ -331,6 +383,9 @@ def build(template: Path, output: Path, port: int, profile_dir: Path, run_migrat
         print("Rebinding buttons to PRIME macros ...")
         rebind_buttons(doc)
 
+        print("Removing legacy WMS_* modules from production ODS ...")
+        remove_legacy_modules(doc)
+
         print("Saving ...")
         doc.store()
         doc.close(False)
@@ -341,10 +396,11 @@ def build(template: Path, output: Path, port: int, profile_dir: Path, run_migrat
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
+        kill_stale_soffice(profile_dir)  # see kill_stale_soffice() - proc.terminate() alone is not enough
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build ПОКАТАК_PRIME_2.0.0.ods from the 1.4.1 template")
+    parser = argparse.ArgumentParser(description="Build ПОКАТАК_PRIME_2.0.1.ods from the 1.4.1 template")
     parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=2002)

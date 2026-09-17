@@ -67,8 +67,19 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     Dim docId As String
     Dim txWritten As Boolean
     txWritten = False
+    Dim committedKeyRegistered As Boolean
+    committedKeyRegistered = False
 
-    PRIME_TryEnter()
+    ' operation_lock (2.0.1): PRIME_TryEnter теперь реально возвращает False, если проведение
+    ' уже идёт - раньше результат игнорировался, и повторный/двойной вызов проходил насквозь.
+    ' Здесь - единственное место, которое имеет право писать в DB_PRIME_*, поэтому проверка
+    ' именно тут защищает вообще любой источник повторного входа (любая кнопка, любой лист).
+    If Not PRIME_TryEnter() Then
+        gLastPostError = "Операция уже выполняется, дождитесь завершения текущего проведения."
+        PRIME_AuditLog("", STAGE_ERROR, plan.SourceSheet, "REENTRANT_CALL_REJECTED:" & plan.SourceKey)
+        PRIME_PostDocument = ""
+        Exit Function
+    End If
     PRIME_AuditLog("", STAGE_BUTTON_ENTER, plan.SourceSheet, plan.SourceKey)
 
     On Error Goto PostFailed
@@ -129,6 +140,7 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     ' 5. COMMITTED - последний логический шаг перед UI/store.
     PRIME_UpdateTxState(opId, TX_COMMITTED, "")
     PRIME_RegisterCommittedKey(plan.SourceKey, docId)
+    committedKeyRegistered = True
     PRIME_AuditLog(opId, STAGE_TX_COMMITTED, plan.SourceSheet, docId)
 
     ' 6. Один store() на весь документ.
@@ -148,6 +160,13 @@ PostFailed:
     gLastPostError = errDesc
     If txWritten Then
         PRIME_TryMarkTxFailed(opId, errDesc)
+    End If
+    ' transaction_cache_store_consistency (2.0.1): если COMMITTED успели выставить и
+    ' зарегистрировать SOURCE_KEY (например, ThisComponent.store() провалился ПОСЛЕ шага 5),
+    ' откатываем кэш вместе с TX - иначе повторная попытка того же SOURCE_KEY получит
+    ' "уже проведено" вместо повторной попытки, хотя TX только что стал FAILED.
+    If committedKeyRegistered Then
+        PRIME_UnregisterCommittedKey(plan.SourceKey)
     End If
     PRIME_AuditLog(opId, STAGE_ERROR, plan.SourceSheet, errDesc)
     PRIME_Leave()
@@ -686,6 +705,12 @@ Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByRef lots() As
     Next i
 End Sub
 
+' committed_only_stock (2.0.1): суммирует ТОЛЬКО движения, чей OP_ID зафиксирован как
+' COMMITTED в SYS_PRIME_TX. Раньше суммировались ВСЕ строки DB_PRIME_MOVEMENTS независимо от
+' состояния транзакции - движения, физически записанные на шаге 4 PRIME_PostDocument, но не
+' доведённые до TX_COMMITTED (сбой/ошибка между записью движений и коммитом, либо между
+' коммитом и успешным store()), ошибочно увеличивали остаток, хотя операция не завершилась
+' или была помечена FAILED. См. golden invariant "Only COMMITTED movements affect stock.".
 Public Function PRIME_LotBalance(ByVal lotId As String) As Double
     If Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then
         PRIME_LotBalance = 0
@@ -693,9 +718,10 @@ Public Function PRIME_LotBalance(ByVal lotId As String) As Double
     End If
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colLot As Long, colQty As Long
+    Dim colLot As Long, colQty As Long, colOpId As Long
     colLot = PRIME_ColIndex(headers, "LOT_ID")
     colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
 
     Dim table As Variant
     table = PRIME_ReadTable(SH_DB_MOVEMENTS)
@@ -705,7 +731,9 @@ Public Function PRIME_LotBalance(ByVal lotId As String) As Double
     If UBound(table) >= 1 Then
         For i = 1 To UBound(table)
             If CStr(table(i)(colLot)) = lotId Then
-                total = total + CDbl(table(i)(colQty))
+                If PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
+                    total = total + CDbl(table(i)(colQty))
+                End If
             End If
         Next i
     End If

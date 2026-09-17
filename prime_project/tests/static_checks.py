@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Статические проверки финального ПОКАТАК_PRIME_2.0.0.ods (static_tests из ТЗ):
+Статические проверки финального ПОКАТАК_PRIME_2.0.1.ods (static_tests из ТЗ):
 - ODS валиден как ZIP, XML парсится
 - модули PRIME встроены в библиотеку Basic
 - манифест библиотеки скриптов валиден
@@ -51,6 +51,22 @@ PRIME_MODULES = [f"PRIME_{n:02d}_{name}" for n, name in [
     (13, "Diagnostics"), (14, "MigrationInstaller"),
 ]]
 
+# legacy_removal (PRIME 2.0.1): должен точно совпадать с tools/build_ods.py's LEGACY_MODULES_TO_REMOVE -
+# продублировано, а не импортировано, по тому же принципу, что и PRIME_MODULES выше (тест не должен
+# зависеть от импорта из tools/ модуля, требующего запущенный UNO-контекст на этапе импорта).
+LEGACY_MODULES_MUST_BE_ABSENT = [
+    "WMS_02_Orders_FINAL", "WMS_03_Issues_FINAL", "WMS_04_DB_Connection", "WMS_05_DB_Install",
+    "WMS_06_DB_Orders", "WMS_07_DB_Issues", "WMS_08_DB_Returns", "WMS_09_DB_Search",
+    "WMS_10_DB_Stock", "WMS_11_DB_UnitsLots", "WMS_12_DB_SmartReceipt", "WMS_13_SystemCenter",
+    "WMS_14_UniversalReceipt", "WMS_15_SafetyCore", "WMS_16_Acts", "WMS_17_ActIntegration",
+    "WMS_18_ActsRegistry", "WMS_19_ProductionUI", "WMS_20_ManualOperations", "WMS_21_Architecture",
+    "WMS_22_References", "WMS_23_ReturnsInventory", "WMS_24_GlobalSearch", "WMS_25_WorkflowActs",
+    "WMS_26_StabilityDiagnostics", "WMS_27_RuntimeCore", "WMS_28_DBEngine", "WMS_30_Integrity",
+    "WMS_31_UIEngine", "WMS_32_AdminReset", "WMS_33_OfflineExports", "WMS_34_ManagerReport",
+    "WMS_35_OrderExtras", "WMS_36_OrderImport", "WMS_37_PrimeUI", "WMS_38_Dashboard",
+    "WMS_99_Installer", "WMS_CORE_Common_FINAL",
+]
+
 failures = []
 passed = []
 
@@ -91,8 +107,19 @@ def zip_level_checks(ods_path: Path):
               "manifest doesn't need to list script-lb explicitly on all LO versions")
 
 
+def kill_stale_soffice(profile_dir: Path):
+    # xvfb-run wraps soffice.bin, so terminating the wrapper PID does not reliably kill the
+    # real soffice.bin child - it can linger and hold this profile dir, breaking a later run
+    # that reuses the same fixed path (observed empirically; see tools/build_ods.py's copy of
+    # this same guard for the full explanation).
+    import subprocess
+    subprocess.run(["pkill", "-9", "-f", f"soffice.bin.*{profile_dir}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
     import subprocess
+    kill_stale_soffice(profile_dir)
     if profile_dir.exists():
         import shutil
         shutil.rmtree(profile_dir)
@@ -132,6 +159,11 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             for mod in PRIME_MODULES:
                 check(f"module embedded: {mod}", lib.hasByName(mod))
 
+            # legacy_removal: production ODS must not embed any of the 38 legacy WMS_* modules.
+            still_present = [m for m in LEGACY_MODULES_MUST_BE_ABSENT if lib.hasByName(m)]
+            check("no legacy WMS_* modules embedded in production ODS", len(still_present) == 0,
+                  f"still embedded: {still_present}")
+
             # --- hidden PRIME tables exist ---
             for sh in EXPECTED_HIDDEN_SHEETS:
                 exists = doc.Sheets.hasByName(sh)
@@ -153,6 +185,33 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
                       f"headers were: {headers}")
             else:
                 check("Заказы sheet exists", False)
+
+            # --- issues_migration / header_schema_registry (2.0.1): business sheets inherited
+            # from the 1.4.1 template must actually carry PRIME's column layout at their real
+            # header row, not the untouched legacy/decorative layout (2.0.0 defect - see
+            # docs/KNOWN_ISSUES.md history). One representative check per affected sheet.
+            EXPECTED_HEADER_SAMPLES = [
+                ("Выдачи", 0, ["№", "Код", "Наименование", "Назначение / проект"]),
+                ("Приход — Цех", 4, ["Дата", "Внутренний код", "Наименование"]),
+                ("Расход — Офис", 4, ["Дата", "Внутренний код", "Назначение / проект"]),
+                ("Возвраты", 4, ["Дата выдачи", "Код", "Осталось к возврату"]),
+                ("Инвентаризация", 4, ["Сессия", "Код", "Учёт", "Факт"]),
+                ("Остаток", 5, ["Код", "Наименование", "Место хранения", "Остаток"]),
+                ("Остаток — Заказы", 4, ["ORDER_ID", "Код товара", "Текущий остаток партии"]),
+                ("База - Поиск", 5, ["Тип", "DOC_ID", "Код", "Подробности"]),
+            ]
+            for sh_name, header_row, expected_cols in EXPECTED_HEADER_SAMPLES:
+                if not doc.Sheets.hasByName(sh_name):
+                    check(f"business sheet exists: {sh_name}", False)
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                cursor = sh.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                last_col = cursor.RangeAddress.EndColumn
+                row_headers = [sh.getCellByPosition(c, header_row).getString() for c in range(last_col + 1)]
+                missing = [c for c in expected_cols if c not in row_headers]
+                check(f"PRIME columns present at real header row: {sh_name}", len(missing) == 0,
+                      f"header row {header_row} missing {missing}, got {row_headers}")
 
             # --- sheet events reference existing PRIME macros ---
             event_sheets = ["Заказы", "Выдачи", "Приход — Цех", "Расход — Цех",
@@ -203,6 +262,7 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             proc.wait(timeout=15)
         except Exception:
             proc.kill()
+        kill_stale_soffice(profile_dir)
 
 
 def main():

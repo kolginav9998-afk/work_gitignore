@@ -46,11 +46,7 @@ Public Sub PRIME_Returns_RefreshButton()
     headers = PRIME_HeaderMap(SH_RETURNS)
 
     ' Очищаем старые строки (только данные, не заголовок) - список полностью пересчитываемый.
-    Dim lastRow As Long
-    lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 
     If Not PRIME_SheetExists(SH_DB_DOC_LINES) Or Not PRIME_SheetExists(SH_DB_DOCUMENTS) Then Exit Sub
 
@@ -143,9 +139,11 @@ Public Sub PRIME_OnContentChanged_Returns(ByVal oRangeAddr As Variant)
     colReturnNow = PRIME_ColIndex(headers, "Вернуть сейчас")
     colState = PRIME_ColIndex(headers, "_PRIME_ReturnState")
 
+    Dim firstDataRow As Long
+    firstDataRow = PRIME_FormSchemaFirstDataRow(SH_RETURNS)
     Dim r As Long, c As Long
     For r = oRangeAddr.StartRow To oRangeAddr.EndRow
-        If r >= 1 Then
+        If r >= firstDataRow Then
             For c = oRangeAddr.StartColumn To oRangeAddr.EndColumn
                 If c = colReturnNow And colState >= 0 Then
                     Dim v As String
@@ -182,7 +180,7 @@ Public Sub PRIME_Returns_ConductButton()
     posted = 0
 
     Dim r As Long
-    For r = 1 To lastRow
+    For r = PRIME_FormSchemaFirstDataRow(SH_RETURNS) To lastRow
         Dim qtyStr As String
         qtyStr = Trim(oSheet.getCellByPosition(colReturnNow, r).getString())
         If qtyStr <> "" And IsNumeric(qtyStr) And CDbl(qtyStr) > 0 Then
@@ -232,11 +230,7 @@ Public Sub PRIME_Inventory_LoadButton()
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_INVENTORY)
 
-    Dim lastRow As Long
-    lastRow = PRIME_FindLastRow(oSheet)
-    If lastRow >= 1 Then
-        oSheet.getCellRangeByPosition(0, 1, UBound(headers), lastRow).clearContents(1023)
-    End If
+    PRIME_ClearDataRows(oSheet, headers)
 
     Dim sessionId As String
     sessionId = "INV-" & Format(PRIME_SequenceNext("INVENTORY_SESSION_ID"), "00000000")
@@ -309,7 +303,7 @@ Public Sub PRIME_Inventory_RecalcButton()
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
     Dim r As Long
-    For r = 1 To lastRow
+    For r = PRIME_FormSchemaFirstDataRow(SH_INVENTORY) To lastRow
         Dim factStr As String
         factStr = Trim(oSheet.getCellByPosition(colFact, r).getString())
         If factStr <> "" And IsNumeric(factStr) Then
@@ -340,7 +334,7 @@ Public Sub PRIME_Inventory_ConductButton()
     posted = 0 : conflicts = 0
 
     Dim r As Long
-    For r = 1 To lastRow
+    For r = PRIME_FormSchemaFirstDataRow(SH_INVENTORY) To lastRow
         Dim diffStr As String
         diffStr = Trim(oSheet.getCellByPosition(colDiff, r).getString())
         If diffStr <> "" And IsNumeric(diffStr) And CDbl(diffStr) <> 0 Then
