@@ -372,6 +372,11 @@ Private Sub PRIME_Search_Execute(ByVal query As String)
             Dim productName As String
             productName = PRIME_GetProductField(productCode, "PRODUCT_NAME")
 
+            ' committed_only_everywhere (R07): DB_PRIME_DOCUMENTS/DOC_LINES строки пишутся ДО
+            ' TX=COMMITTED (см. PRIME_04_Posting.PRIME_WriteDocumentHeader) - поиск не должен
+            ' показывать PREPARED/FAILED документы как реально существующие.
+            If Not PRIME_IsDocIdCommitted(docId) Then GoTo ContinueSearchLoop
+
             Dim docIdx As Long
             docIdx = PRIME_FindRowByKey(docTable, colDocDocId, docId)
             Dim orderId As String
@@ -391,6 +396,7 @@ Private Sub PRIME_Search_Execute(ByVal query As String)
                 outRow = outRow + 1
                 n = n + 1
             End If
+ContinueSearchLoop:
         Next i
     End If
 

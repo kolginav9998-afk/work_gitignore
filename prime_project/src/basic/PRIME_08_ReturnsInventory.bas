@@ -107,7 +107,10 @@ Public Sub PRIME_Returns_RefreshButton()
             Dim docIdx As Long
             docIdx = PRIME_FindRowByKey(docTable, colDocDocId, docId)
             If docIdx >= 0 Then
-                If CStr(docTable(docIdx)(colDocType)) = DOC_ISSUE Then
+                ' committed_only_everywhere (R07): DB_PRIME_DOCUMENTS/DOC_LINES строки пишутся ДО
+                ' TX=COMMITTED (см. PRIME_04_Posting.PRIME_WriteDocumentHeader) - PREPARED/FAILED
+                ' документ не должен предлагать "выдачу" к возврату.
+                If CStr(docTable(docIdx)(colDocType)) = DOC_ISSUE And PRIME_IsDocIdCommitted(docId) Then
                     Dim productCode As String
                     productCode = CStr(lineTable(i)(colProduct))
                     If LCase(PRIME_GetProductField(productCode, "RETURNABLE")) = "1" Then
