@@ -146,6 +146,20 @@ Public Const ORDER_STATUS_RECEIVED As String = "Получено"
 Public Const ORDER_STATUS_OVERDUE As String = "Просрочено"
 Public Const ORDER_STATUS_CANCELLED As String = "Отменено"
 
+' 2.1.2 empirically-found defect: InStrRev не определена в этой сборке StarBasic ("Sub-procedure
+' or function procedure not defined" - обнаружено при проведении возврата, PRIME_DocIdFromLineId
+' вызывает её на каждый возврат). Единая замена - линейный поиск ПОСЛЕДНЕГО вхождения через InStr.
+Public Function PRIME_LastInStr(ByVal s As String, ByVal find As String) As Long
+    Dim p As Long, lastP As Long
+    lastP = 0
+    p = InStr(1, s, find)
+    Do While p > 0
+        lastP = p
+        p = InStr(p + 1, s, find)
+    Loop
+    PRIME_LastInStr = lastP
+End Function
+
 ' Разбор пользовательского ввода даты (PRIME 2.0.1, recommendation dates support):
 ' "24.08", "24/08", "24-08", "24.08.2026", "24/08/2026", "24-08-2026". День/месяц идут первыми
 ' (формат заказчика, не ISO); год по умолчанию - текущий, если не указан. Возвращает
@@ -294,8 +308,10 @@ End Function
 
 ' Расширенный хвост (Ожидаемая дата, Назначение/проект, Получено всего, Осталось получить +
 ' 2.1.0 inline stock/traceability: В наличии сейчас, Последний приход, Дата последнего прихода).
+' 2.1.2: "Выдано"/"Возвращено"/"Контур" - используются ТОЛЬКО на дочерних receipt-position
+' строках (см. PRIME_Orders_InsertChildReceiptRow) - на обычной строке заказа остаются пустыми.
 Public Function PRIME_OrdersExtraColumns() As Variant
-    Dim cols(6) As String
+    Dim cols(9) As String
     cols(0) = "Ожидаемая дата"
     cols(1) = "Назначение / проект"
     cols(2) = "Получено всего"
@@ -303,15 +319,22 @@ Public Function PRIME_OrdersExtraColumns() As Variant
     cols(4) = "В наличии сейчас"
     cols(5) = "Последний приход"
     cols(6) = "Дата последнего прихода"
+    cols(7) = "Выдано"
+    cols(8) = "Возвращено"
+    cols(9) = "Контур"
     PRIME_OrdersExtraColumns = cols
 End Function
 
-' Скрытые технические helper-колонки листа "Заказы" (avoid_many_hidden_columns => только 3, не 10 как в 1.4.1)
+' Скрытые технические helper-колонки листа "Заказы" (avoid_many_hidden_columns => 4, не 10 как в 1.4.1).
+' 2.1.2: _PRIME_RowType различает обычную строку заказа ("" - order line) от дочерней
+' receipt-position строки ("CHILD" - см. orders_must_show_receipt_positions_directly) - дочерние
+' строки никогда не участвуют как самостоятельные order-lines в проведении/автозаполнении.
 Public Function PRIME_OrdersHiddenColumns() As Variant
-    Dim cols(2) As String
+    Dim cols(3) As String
     cols(0) = "_PRIME_OrderID"
     cols(1) = "_PRIME_LineID"
     cols(2) = "_PRIME_State"
+    cols(3) = "_PRIME_RowType"
     PRIME_OrdersHiddenColumns = cols
 End Function
 

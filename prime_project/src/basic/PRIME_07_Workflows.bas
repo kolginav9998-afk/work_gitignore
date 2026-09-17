@@ -181,8 +181,12 @@ Public Sub PRIME_Workflow_ConductAllButton()
     headers = PRIME_HeaderMap(sheetName)
     Dim colCode As Long
     colCode = PRIME_ColIndex(headers, "Внутренний код")
+    Dim colName As Long
+    colName = PRIME_ColIndex(headers, "Наименование")
     Dim colState As Long
     colState = PRIME_ColIndex(headers, "_PRIME_WFState")
+    Dim isReceiptSheet As Boolean
+    isReceiptSheet = PRIME_Workflow_IsReceiptSheet(sheetName)
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
 
@@ -193,7 +197,15 @@ Public Sub PRIME_Workflow_ConductAllButton()
 
     Dim r As Long
     For r = PRIME_FormSchemaFirstDataRow(sheetName) To lastRow
-        If Trim(oSheet.getCellByPosition(colCode, r).getString()) <> "" Then
+        ' receipt_forms_still_require_existing_ei fix (2.1.2): на приходе строка считается
+        ' заполненной, если есть код ИЛИ наименование (новый приход обычно вводится без кода -
+        ' он появится только после проведения). На расходе, как и раньше, только код.
+        Dim hasInput As Boolean
+        hasInput = Trim(oSheet.getCellByPosition(colCode, r).getString()) <> ""
+        If isReceiptSheet And colName >= 0 Then
+            hasInput = hasInput Or Trim(oSheet.getCellByPosition(colName, r).getString()) <> ""
+        End If
+        If hasInput Then
             If colState < 0 Or Left(oSheet.getCellByPosition(colState, r).getString(), 5) <> "DONE:" Then
                 Dim docLine As PrimeDocLine
                 Dim rowKey As String
@@ -202,7 +214,7 @@ Public Sub PRIME_Workflow_ConductAllButton()
                     Exit Sub
                 End If
                 If plan.LineCount = 0 Then
-                    PRIME_InitPlan(plan, IIf(PRIME_Workflow_IsReceiptSheet(sheetName), DOC_RECEIPT, DOC_ISSUE), sheetName, "")
+                    PRIME_InitPlan(plan, IIf(isReceiptSheet, DOC_RECEIPT, DOC_ISSUE), sheetName, "")
                 End If
                 batchKey = batchKey & rowKey & ","
                 rowForLine(plan.LineCount) = r
@@ -223,6 +235,11 @@ Public Sub PRIME_Workflow_ConductAllButton()
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
+        ' EI_CODE новой позиции (решён внутри PRIME_PostDocument/PRIME_ValidateReceipt) обязан
+        ' быть виден пользователю в строке прихода сразу после успешного проведения.
+        If isReceiptSheet Then
+            oSheet.getCellByPosition(colCode, rowForLine(i)).setString(plan.Lines(i).ProductCode)
+        End If
         PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, rowForLine(i))
         If colState >= 0 Then
             oSheet.getCellByPosition(colState, rowForLine(i)).setString("DONE:" & _
@@ -253,6 +270,9 @@ Public Sub PRIME_Workflow_ConductRow(ByVal oSheet As Object, ByVal row As Long)
         Exit Sub
     End If
 
+    If PRIME_Workflow_IsReceiptSheet(sheetName) Then
+        oSheet.getCellByPosition(PRIME_ColIndex(headers, "Внутренний код"), row).setString(plan.Lines(0).ProductCode)
+    End If
     PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, row)
     Dim colState As Long
     colState = PRIME_ColIndex(headers, "_PRIME_WFState")
@@ -286,8 +306,23 @@ Private Function PRIME_Workflow_BuildLine(ByVal oSheet As Object, ByVal sheetNam
 
     Dim code As String
     code = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Внутренний код"), row).getString())
-    If code = "" Then
-        MsgBox "Строка " & (row + 1) & ": не указан внутренний код товара."
+    Dim itemName As String
+    itemName = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Наименование"), row).getString())
+
+    ' receipt_forms_still_require_existing_ei fix (2.1.2): приход НЕ обязан ссылаться на
+    ' существующий код - по модели 2.1.1/2.1.2 каждый приход создаёт новую EI-позицию
+    ' (см. PRIME_04_Posting.PRIME_ValidateReceipt), поэтому единственное реальное требование для
+    ' строки прихода - наименование (код, если указан, всё равно игнорируется при создании новой
+    ' позиции - оставлен только как возможное автозаполнение). Для расхода код (ЕИ-код конкретной
+    ' позиции) остаётся строго обязательным - списывать без него нечего.
+    If isReceipt Then
+        If itemName = "" Then
+            MsgBox "Строка " & (row + 1) & ": не указано наименование товара."
+            PRIME_Workflow_BuildLine = False
+            Exit Function
+        End If
+    ElseIf code = "" Then
+        MsgBox "Строка " & (row + 1) & ": не указан внутренний код товара (ЕИ-код)."
         PRIME_Workflow_BuildLine = False
         Exit Function
     End If
@@ -301,6 +336,7 @@ Private Function PRIME_Workflow_BuildLine(ByVal oSheet As Object, ByVal sheetNam
     End If
 
     docLine.ProductCode = code
+    docLine.ProductName = itemName
     docLine.QtyInput = CDbl(qtyStr)
     docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
     docLine.Contour = PRIME_ContourForSheet(sheetName)

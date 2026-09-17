@@ -78,6 +78,17 @@ Public Sub PRIME_Migration_UpgradeHiddenSchemaTo210()
     ' дописываем колонку в конец; пустое значение в старых строках корректно читается как
     ' "легаси/миграция, видим всегда" (см. PRIME_03_Catalog.PRIME_BuildProductIndex).
     PRIME_Migration_AppendHiddenSchemaColumns SH_DB_PRODUCTS, PRIME_DbProductsColumns()
+
+    ' orders_must_show_receipt_positions_directly (2.1.2): существующий лист "Заказы" 2.1.1 не
+    ' имеет колонок дочерних receipt-position строк ("Выдано"/"Возвращено"/"Контур") и метки
+    ' типа строки (_PRIME_RowType) - дописываем в конец (PRIME_Migration_AppendHiddenSchemaColumns
+    ' работает для любого листа по имени, не только скрытых системных - см. её реализацию).
+    ' PRIME_Migration_MigrateOrdersSheet ниже НЕ подходит для этого - она уже давно no-op для
+    ' любого файла новее 1.4.1 (проверяет только наличие _PRIME_OrderID).
+    If PRIME_SheetExists(SH_ORDERS) Then
+        PRIME_Migration_AppendHiddenSchemaColumns SH_ORDERS, PRIME_OrdersExtraColumns()
+        PRIME_Migration_AppendHiddenSchemaColumns SH_ORDERS, PRIME_OrdersHiddenColumns()
+    End If
 End Sub
 
 Public Sub PRIME_Install_EnsureSchema()

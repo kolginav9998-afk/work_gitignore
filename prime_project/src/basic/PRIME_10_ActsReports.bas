@@ -145,7 +145,7 @@ Public Function PRIME_DocDir() As String
     Dim p As String
     p = ConvertFromURL(ThisComponent.getURL())
     Dim i As Long
-    i = InStrRev(p, GetPathSeparator())
+    i = PRIME_LastInStr(p, GetPathSeparator())
     PRIME_DocDir = Left(p, i)
 End Function
 

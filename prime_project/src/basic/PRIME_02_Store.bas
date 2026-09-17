@@ -58,14 +58,27 @@ End Function
 
 ' Заголовки (строка 0) листа, с кэшем. Инвалидация - PRIME_InvalidateHeaderCache(sheetName)
 ' при структурных изменениях (миграция/установка), не на каждый ввод.
+' headless_repeat_array_cache_read_crash (2.1.2): подтверждённый рантайм-дефект этой сборки
+' StarBasic - Collection, хранящая ЦЕЛЫЙ МАССИВ как элемент (.Add(arr, key)), падает с "Object
+' variable not set" при ВТОРОМ И ПОСЛЕДУЮЩИХ чтениях ТОГО ЖЕ ключа через .Item() внутри ОДНОЙ
+' цепочки вызовов (один клик/один внешний invoke) - воспроизведено изолированно (см. историю):
+' инвалидация кэша перед повторным чтением снимает симптом, но убивает смысл кэша. Настоящая
+' причина - именно МАССИВ-как-элемент Collection (кэши, хранящие скаляры - gCommittedKeyCache и
+' т.п. - этой болезнью не страдают, использованы многократно в цикле без проблем). Обход:
+' кэшируем заголовки одной TAB-строкой (Chr(9)-join) и восстанавливаем массив через Split() при
+' каждом чтении - Split() всегда создаёт НОВЫЙ массив, не разделяемую ссылку на что-то внутри
+' Collection, поэтому повторные чтения безопасны. orders_must_show_receipt_positions_directly
+' сделал повторное чтение заголовков "Заказы" в ОДНОЙ цепочке вызовов частым случаем (once в
+' ConductRow, once внутри PRIME_Orders_RefreshChildRowsForPlan, вызванной из PostDocument той
+' же цепочки) - без этого фикса второй вызов детерминированно падал.
 Public Function PRIME_HeaderMap(ByVal sheetName As String) As Variant
     If gHeaderCache Is Nothing Then
         Set gHeaderCache = New Collection
     End If
 
-    Dim cached As Variant
-    If PRIME_CollectionTryGet(gHeaderCache, sheetName, cached) Then
-        PRIME_HeaderMap = cached
+    Dim cachedStr As Variant
+    If PRIME_CollectionTryGet(gHeaderCache, sheetName, cachedStr) Then
+        PRIME_HeaderMap = Split(CStr(cachedStr), Chr(9))
         Exit Function
     End If
 
@@ -84,11 +97,15 @@ Public Function PRIME_HeaderMap(ByVal sheetName As String) As Variant
 
     Dim headers(lastCol) As String
     Dim i As Long
+    Dim joined As String
+    joined = ""
     For i = 0 To lastCol
         headers(i) = CStr(data(0)(i))
+        If i > 0 Then joined = joined & Chr(9)
+        joined = joined & headers(i)
     Next i
 
-    gHeaderCache.Add(headers, sheetName)
+    gHeaderCache.Add(joined, sheetName)
     PRIME_HeaderMap = headers
 End Function
 
@@ -340,7 +357,7 @@ End Function
 ' режем по первому дефису.
 Public Function PRIME_DocIdFromLineId(ByVal docLineId As String) As String
     Dim pos As Long
-    pos = InStrRev(docLineId, "-L")
+    pos = PRIME_LastInStr(docLineId, "-L")
     If pos <= 0 Then
         PRIME_DocIdFromLineId = ""
     Else

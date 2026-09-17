@@ -38,12 +38,32 @@ Public Sub PRIME_BuildProductIndex()
                 If opId <> "" Then visible = PRIME_IsOpIdCommitted(opId)
             End If
             If code <> "" And visible And Not PRIME_CollectionHasKey(gProductIndex, code) Then
-                gProductIndex.Add(table(i), code)
+                ' headless_repeat_array_cache_read_crash (2.1.2, см. PRIME_02_Store.PRIME_HeaderMap) -
+                ' тот же класс дефекта: массив как элемент Collection падает при повторном .Item()
+                ' в одной цепочке вызовов. PRIME_Orders_AutofillByCode читает 5 разных полей ОДНОГО
+                ' и того же товара подряд (PRIME_GetProductField x5 -> PRIME_GetProduct x5) - без
+                ' этого обхода 2-5-е чтения детерминированно падали бы. Единственный потребитель
+                ' (PRIME_GetProductField) и так всегда делает CStr(rec(col)), потери типов нет.
+                gProductIndex.Add(PRIME_JoinRowAsTabString(table(i)), code)
             End If
         Next i
     End If
     gProductIndexBuilt = True
 End Sub
+
+' См. комментарий headless_repeat_array_cache_read_crash в PRIME_BuildProductIndex выше -
+' Chr(9) выбран как разделитель, потому что ни одно реальное значение колонки товара (коды,
+' наименования, категории, числа/даты как текст) не содержит символ табуляции.
+Private Function PRIME_JoinRowAsTabString(ByVal row As Variant) As String
+    Dim s As String
+    s = ""
+    Dim i As Long
+    For i = LBound(row) To UBound(row)
+        If i > LBound(row) Then s = s & Chr(9)
+        s = s & CStr(row(i))
+    Next i
+    PRIME_JoinRowAsTabString = s
+End Function
 
 Public Sub PRIME_InvalidateProductIndex()
     gProductIndexBuilt = False
@@ -64,7 +84,7 @@ Public Function PRIME_GetProduct(ByVal productCode As String) As Variant
     PRIME_EnsureProductIndex()
     Dim rec As Variant
     If PRIME_CollectionTryGet(gProductIndex, productCode, rec) Then
-        PRIME_GetProduct = rec
+        PRIME_GetProduct = Split(CStr(rec), Chr(9))
     Else
         PRIME_GetProduct = Empty
     End If

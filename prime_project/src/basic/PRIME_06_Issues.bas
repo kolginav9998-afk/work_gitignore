@@ -35,6 +35,7 @@ Type PrimeDocPlan
 End Type
 
 
+
 ' PRIME_06_Issues
 ' Лист "Выдачи": 12 исходных бизнес-колонок 1.4.1 без изменений + "Назначение / проект"
 ' (add_fields) + 1 скрытая helper-колонка _PRIME_IssueState (стабильный ISSUE_DRAFT_ID).

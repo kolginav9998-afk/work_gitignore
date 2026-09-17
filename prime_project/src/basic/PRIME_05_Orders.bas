@@ -58,10 +58,15 @@ Public Sub PRIME_OnContentChanged_Orders(ByVal oRangeAddr As Variant)
     colState = PRIME_ColIndex(headers, "_PRIME_State")
     colExpected = PRIME_ColIndex(headers, "Ожидаемая дата")
     colOrdered = PRIME_ColIndex(headers, "Количество")
+    Dim colRowType As Long
+    colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
 
     Dim r As Long, c As Long
     For r = oRangeAddr.StartRow To oRangeAddr.EndRow
-        If r >= 1 Then
+        ' orders_must_show_receipt_positions_directly (2.1.2): дочерняя receipt-position строка
+        ' не является самостоятельной order-line - редактирование её ячеек (в т.ч. случайное) не
+        ' должно запускать автозаполнение по коду/пересчёт статуса заказа.
+        If r >= 1 And (colRowType < 0 Or oSheet.getCellByPosition(colRowType, r).getString() <> "CHILD") Then
             For c = oRangeAddr.StartColumn To oRangeAddr.EndColumn
                 If c = colCode Then
                     PRIME_Orders_AutofillByCode(oSheet, headers, r)
@@ -307,13 +312,14 @@ Public Sub PRIME_Orders_ConductAllReadyButton()
     headers = PRIME_HeaderMap(SH_ORDERS)
     Dim colFact As Long
     colFact = PRIME_ColIndex(headers, "Факт. количество")
+    Dim colRowType As Long
+    colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
     Dim plan As PrimeDocPlan
     Dim rowForLine(999) As Long
     Dim factQtyForLine(999) As Double
-    Dim newProductRowForLine(999) As Boolean
     Dim batchKey As String
     batchKey = ""
     Dim commonOrderId As String
@@ -322,6 +328,9 @@ Public Sub PRIME_Orders_ConductAllReadyButton()
 
     Dim r As Long
     For r = 1 To lastRow
+        ' orders_must_show_receipt_positions_directly (2.1.2): дочерние receipt-position строки
+        ' никогда не участвуют как самостоятельные order-lines в проведении.
+        If colRowType >= 0 And oSheet.getCellByPosition(colRowType, r).getString() = "CHILD" Then GoTo NextRow
         If Trim(oSheet.getCellByPosition(colFact, r).getString()) <> "" Then
             Dim docLine As PrimeDocLine
             Dim rowOrderId As String, rowDeliveryKey As String
@@ -337,9 +346,9 @@ Public Sub PRIME_Orders_ConductAllReadyButton()
             batchKey = batchKey & rowDeliveryKey & ","
             rowForLine(plan.LineCount) = r
             factQtyForLine(plan.LineCount) = docLine.QtyInput
-            newProductRowForLine(plan.LineCount) = (docLine.ProductCode = "")
             PRIME_PlanAddLine(plan, docLine)
         End If
+NextRow:
     Next r
 
     If plan.LineCount = 0 Then
@@ -360,11 +369,15 @@ Public Sub PRIME_Orders_ConductAllReadyButton()
         Exit Sub
     End If
 
+    ' orders_partial_receipts_show_wrong_ei fix (2.1.2): обрабатываем строки СТРОГО в обратном
+    ' порядке (снизу вверх) - вставка дочерней строки под rowForLine(i) физически сдвигает вниз
+    ' ВСЕ строки листа ниже неё. Если бы мы шли сверху вниз, rowForLine(i+1) (вычисленный ДО
+    ' любых вставок) указывал бы уже не туда после первой же вставки выше него. Вставка ниже
+    ' необработанных строк их не задевает, поэтому "снизу вверх" безопасно.
     Dim i As Long
-    For i = 0 To plan.LineCount - 1
-        If newProductRowForLine(i) Then
-            oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), rowForLine(i)).setString(plan.Lines(i).ProductCode)
-        End If
+    For i = plan.LineCount - 1 To 0 Step -1
+        PRIME_Orders_InsertChildReceiptRow oSheet, headers, rowForLine(i), plan.Lines(i).ProductCode, plan.DocDate, _
+            factQtyForLine(i), plan.Lines(i).Contour, plan.Lines(i).LocationTo, docId
         PRIME_Orders_ApplyReceiptResult(oSheet, headers, rowForLine(i), factQtyForLine(i), docId)
     Next i
 
@@ -397,11 +410,13 @@ Public Sub PRIME_Orders_ConductRow(ByVal oSheet As Object, ByVal row As Long)
         Exit Sub
     End If
 
-    ' Если код товара был пуст - PRIME_PostDocument (ByRef plan) заполнил его сгенерированным
-    ' ЕИ-кодом в plan.Lines(0) - подставляем обратно в лист.
-    If plan.Lines(0).ProductCode <> "" And Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).getString()) = "" Then
-        oSheet.getCellByPosition(PRIME_ColIndex(headers, "Код товара"), row).setString(plan.Lines(0).ProductCode)
-    End If
+    ' orders_partial_receipts_show_wrong_ei fix (2.1.2): каждый приход по этой order-line
+    ' получает СВОЙ новый ЕИ-код (plan.Lines(0).ProductCode, решённый внутри PRIME_PostDocument) -
+    ' он больше НЕ записывается в "Код товара" родительской строки (это и вызывало старый баг,
+    ' когда второй частичный приход "терял" код первого/показывал устаревший). Вместо этого для
+    ' него создаётся отдельная дочерняя receipt-position строка прямо под родительской.
+    PRIME_Orders_InsertChildReceiptRow oSheet, headers, row, plan.Lines(0).ProductCode, plan.DocDate, _
+        factQty, plan.Lines(0).Contour, plan.Lines(0).LocationTo, docId
 
     PRIME_Orders_ApplyReceiptResult(oSheet, headers, row, factQty, docId)
     MsgBox "Проведено: " & docId
@@ -486,6 +501,151 @@ Private Sub PRIME_Orders_ApplyReceiptResult(ByVal oSheet As Object, ByVal header
     PRIME_Orders_RecomputeStatus(oSheet, headers, row)
 End Sub
 
+' orders_must_show_receipt_positions_directly (2.1.2): физически вставляет дочернюю
+' receipt-position строку СРАЗУ под родительской order-line (после уже существующих дочерних
+' строк ЭТОЙ ЖЕ строки заказа - так несколько частичных приходов стопкой идут по порядку
+' получения). Каждая такая строка - представление ОДНОГО конкретного ЕИ-кода/прихода, никогда
+' не участвует в повторном проведении как самостоятельная order-line (см. guard'ы по
+' "_PRIME_RowType" = "CHILD" выше и в ResolveByArticle/FillAllByCode ниже).
+Public Sub PRIME_Orders_InsertChildReceiptRow(ByVal oSheet As Object, ByVal headers As Variant, ByVal parentRow As Long, _
+        ByVal eiCode As String, ByVal receiptDate As String, ByVal qty As Double, ByVal contour As String, _
+        ByVal location As String, ByVal docId As String)
+    Dim colRowType As Long, colLineId As Long, colOrderId As Long
+    colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
+    If colRowType < 0 Then Exit Sub ' файл не проходил апгрейд схемы 2.1.2 - дочерние строки не создаём
+
+    colLineId = PRIME_ColIndex(headers, "_PRIME_LineID")
+    colOrderId = PRIME_ColIndex(headers, "_PRIME_OrderID")
+    Dim parentLineId As String, parentOrderId As String
+    parentLineId = ""
+    parentOrderId = ""
+    If colLineId >= 0 Then parentLineId = oSheet.getCellByPosition(colLineId, parentRow).getString()
+    If colOrderId >= 0 Then parentOrderId = oSheet.getCellByPosition(colOrderId, parentRow).getString()
+
+    ' Ищем место ПОСЛЕ уже существующих дочерних строк этой же order-line, чтобы вторая/третья
+    ' частичная поставка добавлялась ниже первой, а не между родителем и первой дочерней строкой.
+    Dim lastRow As Long
+    lastRow = PRIME_FindLastRow(oSheet)
+    Dim insertAt As Long
+    insertAt = parentRow + 1
+    Do While insertAt <= lastRow
+        If oSheet.getCellByPosition(colRowType, insertAt).getString() <> "CHILD" Then Exit Do
+        If colLineId >= 0 Then
+            If oSheet.getCellByPosition(colLineId, insertAt).getString() <> parentLineId Then Exit Do
+        End If
+        insertAt = insertAt + 1
+    Loop
+
+    oSheet.Rows.insertByIndex(insertAt, 1)
+
+    oSheet.getCellByPosition(colRowType, insertAt).setString("CHILD")
+    If colLineId >= 0 Then oSheet.getCellByPosition(colLineId, insertAt).setString(parentLineId)
+    If colOrderId >= 0 Then oSheet.getCellByPosition(colOrderId, insertAt).setString(parentOrderId)
+
+    Dim colName As Long, colCode As Long, colRecvDate As Long, colFact As Long, colLoc As Long
+    Dim colContour As Long, colDoc As Long, colIssued As Long, colReturned As Long, colAvail As Long
+    colName = PRIME_ColIndex(headers, "Полное наименование товара")
+    colCode = PRIME_ColIndex(headers, "Код товара")
+    colRecvDate = PRIME_ColIndex(headers, "Дата поступления")
+    colFact = PRIME_ColIndex(headers, "Факт. количество")
+    colLoc = PRIME_ColIndex(headers, "Место хранения")
+    colContour = PRIME_ColIndex(headers, "Контур")
+    colDoc = PRIME_ColIndex(headers, "№ документа")
+    colIssued = PRIME_ColIndex(headers, "Выдано")
+    colReturned = PRIME_ColIndex(headers, "Возвращено")
+    colAvail = PRIME_ColIndex(headers, "В наличии сейчас")
+
+    If colName >= 0 Then oSheet.getCellByPosition(colName, insertAt).setString("↳ приход")
+    If colCode >= 0 Then oSheet.getCellByPosition(colCode, insertAt).setString(eiCode)
+    If colRecvDate >= 0 Then oSheet.getCellByPosition(colRecvDate, insertAt).setString(receiptDate)
+    If colFact >= 0 Then oSheet.getCellByPosition(colFact, insertAt).setValue(qty)
+    If colLoc >= 0 Then oSheet.getCellByPosition(colLoc, insertAt).setString(location)
+    If colContour >= 0 Then oSheet.getCellByPosition(colContour, insertAt).setString(PRIME_ContourDisplayName(contour))
+    If colDoc >= 0 Then oSheet.getCellByPosition(colDoc, insertAt).setString(docId)
+    ' Изначально ничего не выдано/не возвращено, остаток = только что полученное количество -
+    ' PRIME_Orders_RefreshChildRow пересчитает эти три поля точно по ledger при следующей операции.
+    If colIssued >= 0 Then oSheet.getCellByPosition(colIssued, insertAt).setValue(0)
+    If colReturned >= 0 Then oSheet.getCellByPosition(colReturned, insertAt).setValue(0)
+    If colAvail >= 0 Then oSheet.getCellByPosition(colAvail, insertAt).setValue(qty)
+
+    PRIME_Orders_StyleChildRow(oSheet, headers, insertAt)
+End Sub
+
+' Визуально отличаем дочернюю receipt-position строку от обычной order-line (курсив + светло-
+' серый фон на всю строку) - требование orders_must_show_receipt_positions_directly.
+Public Sub PRIME_Orders_StyleChildRow(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    Dim oRange As Object
+    oRange = oSheet.getCellRangeByPosition(0, row, UBound(headers), row)
+    oRange.CharPosture = com.sun.star.awt.FontSlant.ITALIC
+    oRange.CellBackColor = RGB(240, 240, 240)
+End Sub
+
+' Пересчитывает "В наличии сейчас"/"Выдано"/"Возвращено" одной дочерней receipt-position строки
+' по актуальному COMMITTED-ledger (R02 - остаток строго по товару/месту/контуру, контур для
+' "Заказы" всегда SC_GENERAL - см. PRIME_Orders_RefreshAvailability). "Выдано"/"Возвращено" -
+' по LOT_ID, связанному с ЕИ-кодом этой строки (2.1.1: 1 ЕИ-код = 1 партия).
+Public Sub PRIME_Orders_RefreshChildRow(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    Dim colCode As Long, colLoc As Long, colAvail As Long, colIssued As Long, colReturned As Long
+    colCode = PRIME_ColIndex(headers, "Код товара")
+    colLoc = PRIME_ColIndex(headers, "Место хранения")
+    colAvail = PRIME_ColIndex(headers, "В наличии сейчас")
+    colIssued = PRIME_ColIndex(headers, "Выдано")
+    colReturned = PRIME_ColIndex(headers, "Возвращено")
+    If colCode < 0 Then Exit Sub
+
+    Dim code As String
+    code = Trim(oSheet.getCellByPosition(colCode, row).getString())
+    If code = "" Then Exit Sub
+
+    Dim loc As String
+    loc = ""
+    If colLoc >= 0 Then loc = Trim(oSheet.getCellByPosition(colLoc, row).getString())
+
+    If colAvail >= 0 Then
+        oSheet.getCellByPosition(colAvail, row).setValue(PRIME_LocationContourBalance(code, loc, SC_GENERAL))
+    End If
+
+    Dim lotId As String
+    lotId = PRIME_LotIdForProductCode(code)
+    If colIssued >= 0 Then oSheet.getCellByPosition(colIssued, row).setValue(PRIME_IssuedQtyForLot(lotId))
+    If colReturned >= 0 Then oSheet.getCellByPosition(colReturned, row).setValue(PRIME_ReturnedQtyForLot(lotId))
+End Sub
+
+' "Заказы" не получает событий с других листов (Выдачи/Возвраты/Перемещения/Инвентаризация) -
+' вызывается из PRIME_04_Posting.PRIME_PostDocument ПОСЛЕ store(), чтобы дочерние строки, чей
+' ЕИ-код затронут только что проведённым документом, отразили актуальный остаток/выдано/
+' возвращено сразу же (manual_acceptance: "остаток на Заказы обновляется живьём после выдачи").
+Public Sub PRIME_Orders_RefreshChildRowsForPlan(ByRef plan As PrimeDocPlan)
+    If Not PRIME_SheetExists(SH_ORDERS) Then Exit Sub
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(SH_ORDERS)
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_ORDERS)
+    Dim colRowType As Long, colCode As Long
+    colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
+    colCode = PRIME_ColIndex(headers, "Код товара")
+    If colRowType < 0 Or colCode < 0 Then Exit Sub
+
+    Dim lastRow As Long
+    lastRow = PRIME_FindLastRow(oSheet)
+    Dim r As Long
+    For r = 1 To lastRow
+        If oSheet.getCellByPosition(colRowType, r).getString() = "CHILD" Then
+            Dim rowCode As String
+            rowCode = Trim(oSheet.getCellByPosition(colCode, r).getString())
+            If rowCode <> "" Then
+                Dim i As Long
+                For i = 0 To plan.LineCount - 1
+                    If plan.Lines(i).ProductCode = rowCode Then
+                        PRIME_Orders_RefreshChildRow(oSheet, headers, r)
+                        Exit For
+                    End If
+                Next i
+            End If
+        End If
+    Next r
+End Sub
+
 ' "Распознать по артикулам": для строк без "Код товара", но с заполненным "Код поставщика"/
 ' "Артикул поставщика", подставляет код через product_aliases (ambiguous_match_behavior:
 ' не угадывать при нескольких совпадениях - оставляет строку как есть).
@@ -494,12 +654,13 @@ Public Sub PRIME_Orders_ResolveByArticleButton()
     oSheet = PRIME_GetSheet(SH_ORDERS)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_ORDERS)
-    Dim colCode As Long, colPlatform As Long, colSeller As Long, colSupCode As Long, colSupArt As Long
+    Dim colCode As Long, colPlatform As Long, colSeller As Long, colSupCode As Long, colSupArt As Long, colRowType As Long
     colCode = PRIME_ColIndex(headers, "Код товара")
     colPlatform = PRIME_ColIndex(headers, "От кого / площадка")
     colSeller = PRIME_ColIndex(headers, "Продавец")
     colSupCode = PRIME_ColIndex(headers, "Код поставщика")
     colSupArt = PRIME_ColIndex(headers, "Артикул поставщика")
+    colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
 
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
@@ -508,7 +669,10 @@ Public Sub PRIME_Orders_ResolveByArticleButton()
 
     Dim r As Long
     For r = 1 To lastRow
-        If oSheet.getCellByPosition(colCode, r).getString() = "" Then
+        ' orders_must_show_receipt_positions_directly (2.1.2): дочерняя receipt-position строка
+        ' не является самостоятельной order-line - никогда не подставляем ей код по артикулу.
+        If (colRowType < 0 Or oSheet.getCellByPosition(colRowType, r).getString() <> "CHILD") And _
+                oSheet.getCellByPosition(colCode, r).getString() = "" Then
             Dim match As String
             match = PRIME_FindProductByAlias( _
                 oSheet.getCellByPosition(colPlatform, r).getString(), _
@@ -533,11 +697,17 @@ Public Sub PRIME_Orders_FillAllByCodeButton()
     oSheet = PRIME_GetSheet(SH_ORDERS)
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_ORDERS)
+    Dim colRowType As Long
+    colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
     Dim r As Long
     For r = 1 To lastRow
-        PRIME_Orders_AutofillByCode(oSheet, headers, r)
+        ' orders_must_show_receipt_positions_directly (2.1.2): дочерние receipt-position строки
+        ' не автозаполняются как обычные order-lines.
+        If colRowType < 0 Or oSheet.getCellByPosition(colRowType, r).getString() <> "CHILD" Then
+            PRIME_Orders_AutofillByCode(oSheet, headers, r)
+        End If
     Next r
     MsgBox "Автозаполнение по кодам выполнено для " & lastRow & " строк."
 End Sub

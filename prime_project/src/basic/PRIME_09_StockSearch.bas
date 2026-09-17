@@ -140,10 +140,25 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
 ContinueLoop:
     Next i
 
-    Dim outRows() As Variant
-    ReDim outRows(n)
+    ' headless_buffered_array_readback_corruption (2.1.2, см. PRIME_04_Posting.PRIME_PostIssueLines) -
+    ' раньше строки накапливались в outRows()-буфер (Dim row() внутри цикла, ReDim Preserve в конце)
+    ' и передавались одним PRIME_AppendRowsBatch; фикс - писать каждую строку сразу поячейково
+    ' внутри цикла, без буферизации.
+    Dim colOutCode As Long, colOutName As Long, colOutContour As Long, colOutLoc As Long
+    Dim colOutUnit As Long, colOutBalance As Long, colOutLastOp As Long
+    colOutCode = PRIME_ColIndex(headers, "Код")
+    colOutName = PRIME_ColIndex(headers, "Наименование")
+    colOutContour = PRIME_ColIndex(headers, "Контур")
+    colOutLoc = PRIME_ColIndex(headers, "Место хранения")
+    colOutUnit = PRIME_ColIndex(headers, "Ед. изм.")
+    colOutBalance = PRIME_ColIndex(headers, "Остаток")
+    colOutLastOp = PRIME_ColIndex(headers, "Последняя операция")
+
+    Dim outRow As Long
+    outRow = PRIME_FormSchemaFirstDataRow(SH_STOCK)
     Dim outN As Long
     outN = 0
+    Dim parts() As String
     For i = 0 To n - 1
         Dim include As Boolean
         Select Case filterMode
@@ -152,25 +167,18 @@ ContinueLoop:
             Case Else : include = True
         End Select
         If include Then
-            Dim parts() As String
             parts = Split(keys(i), "|")
-            Dim row(UBound(headers)) As Variant
-            row(PRIME_ColIndex(headers, "Код")) = parts(0)
-            row(PRIME_ColIndex(headers, "Наименование")) = PRIME_GetProductField(parts(0), "PRODUCT_NAME")
-            row(PRIME_ColIndex(headers, "Контур")) = PRIME_ContourDisplayName(parts(1))
-            row(PRIME_ColIndex(headers, "Место хранения")) = parts(2)
-            row(PRIME_ColIndex(headers, "Ед. изм.")) = PRIME_GetProductField(parts(0), "BASE_UNIT")
-            row(PRIME_ColIndex(headers, "Остаток")) = qtys(i)
-            row(PRIME_ColIndex(headers, "Последняя операция")) = lastDates(i)
-            outRows(outN) = row
+            oSheet.getCellByPosition(colOutCode, outRow).setString(parts(0))
+            oSheet.getCellByPosition(colOutName, outRow).setString(PRIME_GetProductField(parts(0), "PRODUCT_NAME"))
+            oSheet.getCellByPosition(colOutContour, outRow).setString(PRIME_ContourDisplayName(parts(1)))
+            oSheet.getCellByPosition(colOutLoc, outRow).setString(parts(2))
+            oSheet.getCellByPosition(colOutUnit, outRow).setString(PRIME_GetProductField(parts(0), "BASE_UNIT"))
+            oSheet.getCellByPosition(colOutBalance, outRow).setValue(qtys(i))
+            oSheet.getCellByPosition(colOutLastOp, outRow).setString(lastDates(i))
+            outRow = outRow + 1
             outN = outN + 1
         End If
     Next i
-
-    If outN > 0 Then
-        ReDim Preserve outRows(outN - 1)
-        PRIME_AppendRowsBatch(SH_STOCK, outRows)
-    End If
 End Sub
 
 ' === Остаток — Заказы ==========================================================================
@@ -331,8 +339,22 @@ Private Sub PRIME_Search_Execute(ByVal query As String)
     colDocDate = PRIME_ColIndex(docHeaders, "DOC_DATE")
     colOrderId = PRIME_ColIndex(docHeaders, "ORDER_ID")
 
-    Dim outRows() As Variant
-    ReDim outRows(200)
+    ' headless_buffered_array_readback_corruption (2.1.2, см. PRIME_04_Posting.PRIME_PostIssueLines) -
+    ' раньше строки накапливались в outRows()-буфер (Dim row() внутри цикла, растущий ReDim Preserve)
+    ' и передавались одним PRIME_AppendRowsBatch; фикс - писать каждую строку сразу поячейково
+    ' внутри цикла, без буферизации.
+    Dim colOutType As Long, colOutDate As Long, colOutDocId As Long, colOutCode As Long
+    Dim colOutName As Long, colOutQty As Long, colOutDetails As Long
+    colOutType = PRIME_ColIndex(headers, "Тип")
+    colOutDate = PRIME_ColIndex(headers, "Дата")
+    colOutDocId = PRIME_ColIndex(headers, "DOC_ID")
+    colOutCode = PRIME_ColIndex(headers, "Код")
+    colOutName = PRIME_ColIndex(headers, "Наименование")
+    colOutQty = PRIME_ColIndex(headers, "Количество")
+    colOutDetails = PRIME_ColIndex(headers, "Подробности")
+
+    Dim outRow As Long
+    outRow = PRIME_FormSchemaFirstDataRow(SH_SEARCH)
     Dim n As Long
     n = 0
 
@@ -359,24 +381,20 @@ Private Sub PRIME_Search_Execute(ByVal query As String)
             Dim haystack As String
             haystack = LCase(docId & " " & productCode & " " & productName & " " & recipient & " " & dest & " " & orderId)
             If InStr(haystack, query) > 0 Then
-                Dim row(UBound(headers)) As Variant
-                row(PRIME_ColIndex(headers, "Тип")) = IIf(docIdx >= 0, CStr(docTable(docIdx)(colDocType)), "")
-                row(PRIME_ColIndex(headers, "Дата")) = IIf(docIdx >= 0, CStr(docTable(docIdx)(colDocDate)), "")
-                row(PRIME_ColIndex(headers, "DOC_ID")) = docId
-                row(PRIME_ColIndex(headers, "Код")) = productCode
-                row(PRIME_ColIndex(headers, "Наименование")) = productName
-                row(PRIME_ColIndex(headers, "Количество")) = CDbl(lineTable(i)(colQty))
-                row(PRIME_ColIndex(headers, "Подробности")) = "Получатель: " & recipient & "; Назначение: " & dest & "; ORDER_ID: " & orderId
-                If n > UBound(outRows) Then ReDim Preserve outRows(UBound(outRows) + 200)
-                outRows(n) = row
+                oSheet.getCellByPosition(colOutType, outRow).setString(IIf(docIdx >= 0, CStr(docTable(docIdx)(colDocType)), ""))
+                oSheet.getCellByPosition(colOutDate, outRow).setString(IIf(docIdx >= 0, CStr(docTable(docIdx)(colDocDate)), ""))
+                oSheet.getCellByPosition(colOutDocId, outRow).setString(docId)
+                oSheet.getCellByPosition(colOutCode, outRow).setString(productCode)
+                oSheet.getCellByPosition(colOutName, outRow).setString(productName)
+                oSheet.getCellByPosition(colOutQty, outRow).setValue(CDbl(lineTable(i)(colQty)))
+                oSheet.getCellByPosition(colOutDetails, outRow).setString("Получатель: " & recipient & "; Назначение: " & dest & "; ORDER_ID: " & orderId)
+                outRow = outRow + 1
                 n = n + 1
             End If
         Next i
     End If
 
     If n > 0 Then
-        ReDim Preserve outRows(n - 1)
-        PRIME_AppendRowsBatch(SH_SEARCH, outRows)
         MsgBox "Найдено строк: " & n
     Else
         MsgBox "Ничего не найдено."

@@ -77,10 +77,27 @@ Public Sub PRIME_Returns_RefreshButton()
     colDocType = PRIME_ColIndex(docHeaders, "DOC_TYPE")
     colDocDate = PRIME_ColIndex(docHeaders, "DOC_DATE")
 
-    Dim outRows() As Variant
-    ReDim outRows(200)
-    Dim n As Long
-    n = 0
+    ' headless_buffered_array_readback_corruption (2.1.2, см. PRIME_04_Posting.PRIME_PostIssueLines) -
+    ' здесь раньше строки накапливались в outRows()-буфер (нарастающий Variant()-массив с Dim row()
+    ' внутри цикла) и передавались одним PRIME_AppendRowsBatch в конце; после хотя бы одной более
+    ' ранней записи на другой лист в этой же цепочке invoke это детерминированно писало на "Возвраты"
+    ' пустые/нулевые строки без единой ошибки (подтверждено прямым чтением листа). Фикс - как и в
+    ' PostIssueLines: писать каждую строку сразу поячейково внутри цикла, без буферизации.
+    Dim colOutDate As Long, colOutCode As Long, colOutName As Long, colOutIssued As Long
+    Dim colOutReturned As Long, colOutRemaining As Long, colOutUnit As Long, colOutWhom As Long
+    Dim colOutOrigLine As Long
+    colOutDate = PRIME_ColIndex(headers, "Дата выдачи")
+    colOutCode = PRIME_ColIndex(headers, "Код")
+    colOutName = PRIME_ColIndex(headers, "Наименование")
+    colOutIssued = PRIME_ColIndex(headers, "Выдано")
+    colOutReturned = PRIME_ColIndex(headers, "Уже возвращено")
+    colOutRemaining = PRIME_ColIndex(headers, "Осталось к возврату")
+    colOutUnit = PRIME_ColIndex(headers, "Ед. изм.")
+    colOutWhom = PRIME_ColIndex(headers, "Кому")
+    colOutOrigLine = PRIME_ColIndex(headers, "_PRIME_OriginalLineId")
+
+    Dim outRow As Long
+    outRow = PRIME_FormSchemaFirstDataRow(SH_RETURNS)
 
     Dim i As Long
     If UBound(lineTable) >= 1 Then
@@ -103,29 +120,21 @@ Public Sub PRIME_Returns_RefreshButton()
                         Dim remaining As Double
                         remaining = issuedQty - returnedQty
                         If remaining > 0.0000005 Then
-                            Dim row(UBound(headers)) As Variant
-                            row(PRIME_ColIndex(headers, "Дата выдачи")) = CStr(docTable(docIdx)(colDocDate))
-                            row(PRIME_ColIndex(headers, "Код")) = productCode
-                            row(PRIME_ColIndex(headers, "Наименование")) = PRIME_GetProductField(productCode, "PRODUCT_NAME")
-                            row(PRIME_ColIndex(headers, "Выдано")) = issuedQty
-                            row(PRIME_ColIndex(headers, "Уже возвращено")) = returnedQty
-                            row(PRIME_ColIndex(headers, "Осталось к возврату")) = remaining
-                            row(PRIME_ColIndex(headers, "Ед. изм.")) = PRIME_GetProductField(productCode, "BASE_UNIT")
-                            row(PRIME_ColIndex(headers, "Кому")) = CStr(lineTable(i)(colRecipient))
-                            row(PRIME_ColIndex(headers, "_PRIME_OriginalLineId")) = lineId
-                            If n > UBound(outRows) Then ReDim Preserve outRows(UBound(outRows) + 200)
-                            outRows(n) = row
-                            n = n + 1
+                            oSheet.getCellByPosition(colOutDate, outRow).setString(CStr(docTable(docIdx)(colDocDate)))
+                            oSheet.getCellByPosition(colOutCode, outRow).setString(productCode)
+                            oSheet.getCellByPosition(colOutName, outRow).setString(PRIME_GetProductField(productCode, "PRODUCT_NAME"))
+                            oSheet.getCellByPosition(colOutIssued, outRow).setValue(issuedQty)
+                            oSheet.getCellByPosition(colOutReturned, outRow).setValue(returnedQty)
+                            oSheet.getCellByPosition(colOutRemaining, outRow).setValue(remaining)
+                            oSheet.getCellByPosition(colOutUnit, outRow).setString(PRIME_GetProductField(productCode, "BASE_UNIT"))
+                            oSheet.getCellByPosition(colOutWhom, outRow).setString(CStr(lineTable(i)(colRecipient)))
+                            oSheet.getCellByPosition(colOutOrigLine, outRow).setString(lineId)
+                            outRow = outRow + 1
                         End If
                     End If
                 End If
             End If
         Next i
-    End If
-
-    If n > 0 Then
-        ReDim Preserve outRows(n - 1)
-        PRIME_AppendRowsBatch(SH_RETURNS, outRows)
     End If
 End Sub
 
@@ -273,19 +282,36 @@ Public Sub PRIME_Inventory_LoadButton()
     colCat = PRIME_ColIndex(prodHeaders, "CATEGORY")
     colSub = PRIME_ColIndex(prodHeaders, "SUBCATEGORY")
 
-    Dim outRows() As Variant
-    ReDim outRows(200)
+    ' headless_buffered_array_readback_corruption (2.1.2, см. PRIME_04_Posting.PRIME_PostIssueLines) -
+    ' раньше строки накапливались в outRows()-буфер (нарастающий Variant()-массив с Dim row() внутри
+    ' цикла) и передавались одним PRIME_AppendRowsBatch в конце; это тот же ненадёжный паттерн, что
+    ' был найден и исправлен в PostIssueLines и в PRIME_Returns_RefreshButton - пишем каждую строку
+    ' сразу поячейково внутри цикла, без буферизации.
+    Dim colOutSession As Long, colOutCode As Long, colOutName As Long, colOutLoc As Long
+    Dim colOutContour As Long, colOutCat As Long, colOutSub As Long, colOutUchet As Long, colOutUnit As Long
+    colOutSession = PRIME_ColIndex(headers, "Сессия")
+    colOutCode = PRIME_ColIndex(headers, "Код")
+    colOutName = PRIME_ColIndex(headers, "Наименование")
+    colOutLoc = PRIME_ColIndex(headers, "Место")
+    colOutContour = PRIME_ColIndex(headers, "Контур")
+    colOutCat = PRIME_ColIndex(headers, "Категория")
+    colOutSub = PRIME_ColIndex(headers, "Подкатегория")
+    colOutUchet = PRIME_ColIndex(headers, "Учёт")
+    colOutUnit = PRIME_ColIndex(headers, "Ед. изм.")
+
+    Dim outRow As Long
+    outRow = PRIME_FormSchemaFirstDataRow(SH_INVENTORY)
     Dim n As Long
     n = 0
 
+    Dim locations() As String
+    Dim quantities() As Double
+    Dim contours() As String
     If UBound(prodTable) >= 1 Then
         Dim p As Long
         For p = 1 To UBound(prodTable)
             Dim code As String
             code = CStr(prodTable(p)(colCode))
-            Dim locations() As String
-            Dim quantities() As Double
-            Dim contours() As String
             ' contourFilter="" - снимаем остаток по КАЖДОМУ (месту, контуру) отдельно (R06):
             ' один и тот же код на одном месте, но в разных контурах, не должен задваивать разницу.
             PRIME_StockByLocation(code, "", locations, quantities, contours)
@@ -293,28 +319,21 @@ Public Sub PRIME_Inventory_LoadButton()
                 Dim l As Long
                 For l = LBound(locations) To UBound(locations)
                     If quantities(l) <> 0 Then
-                        Dim row(UBound(headers)) As Variant
-                        row(PRIME_ColIndex(headers, "Сессия")) = sessionId
-                        row(PRIME_ColIndex(headers, "Код")) = code
-                        row(PRIME_ColIndex(headers, "Наименование")) = CStr(prodTable(p)(colName))
-                        row(PRIME_ColIndex(headers, "Место")) = locations(l)
-                        row(PRIME_ColIndex(headers, "Контур")) = contours(l)
-                        row(PRIME_ColIndex(headers, "Категория")) = CStr(prodTable(p)(colCat))
-                        row(PRIME_ColIndex(headers, "Подкатегория")) = CStr(prodTable(p)(colSub))
-                        row(PRIME_ColIndex(headers, "Учёт")) = quantities(l)
-                        row(PRIME_ColIndex(headers, "Ед. изм.")) = PRIME_GetProductField(code, "BASE_UNIT")
-                        If n > UBound(outRows) Then ReDim Preserve outRows(UBound(outRows) + 200)
-                        outRows(n) = row
+                        oSheet.getCellByPosition(colOutSession, outRow).setString(sessionId)
+                        oSheet.getCellByPosition(colOutCode, outRow).setString(code)
+                        oSheet.getCellByPosition(colOutName, outRow).setString(CStr(prodTable(p)(colName)))
+                        oSheet.getCellByPosition(colOutLoc, outRow).setString(locations(l))
+                        oSheet.getCellByPosition(colOutContour, outRow).setString(contours(l))
+                        oSheet.getCellByPosition(colOutCat, outRow).setString(CStr(prodTable(p)(colCat)))
+                        oSheet.getCellByPosition(colOutSub, outRow).setString(CStr(prodTable(p)(colSub)))
+                        oSheet.getCellByPosition(colOutUchet, outRow).setValue(quantities(l))
+                        oSheet.getCellByPosition(colOutUnit, outRow).setString(PRIME_GetProductField(code, "BASE_UNIT"))
+                        outRow = outRow + 1
                         n = n + 1
                     End If
                 Next l
             End If
         Next p
-    End If
-
-    If n > 0 Then
-        ReDim Preserve outRows(n - 1)
-        PRIME_AppendRowsBatch(SH_INVENTORY, outRows)
     End If
 
     MsgBox "Загружено строк остатка: " & n & ". Сессия: " & sessionId

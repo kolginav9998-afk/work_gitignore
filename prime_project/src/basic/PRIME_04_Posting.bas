@@ -175,6 +175,16 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     ThisComponent.store()
     PRIME_AuditLog(opId, STAGE_STORE_OK, plan.SourceSheet, docId)
 
+    ' orders_must_show_receipt_positions_directly (2.1.2): "Заказы" не получает событий с других
+    ' листов - обновляем её дочерние receipt-position строки (Остаток/Выдано/Возвращено) для
+    ' любых ЕИ-кодов, затронутых ЭТИМ документом (Issue/Return/Transfer/Adjustment с "Заказы"
+    ' самой не связаны напрямую, но их EI_CODE мог быть создан приходом ЧЕРЕЗ "Заказы"). Сбой
+    ' чисто визуального обновления не должен откатывать уже COMMITTED и сохранённую транзакцию -
+    ' временно подавляем ошибки только вокруг этого вызова.
+    On Error Resume Next
+    PRIME_Orders_RefreshChildRowsForPlan(plan)
+    On Error Goto PostFailed
+
     PRIME_AuditLog(opId, STAGE_UI_FINALIZED, plan.SourceSheet, docId)
     PRIME_Leave()
     gLastPostDocId = docId
@@ -733,23 +743,69 @@ Private Function PRIME_Orders_RowByLineId(ByVal orderLineId As String) As Varian
 End Function
 
 ' === ISSUE: FIFO-разбиение по партиям (строго место+контур), allocations, отрицательные движения ==
+' headless_buffered_array_readback_corruption (2.1.2, обнаружено при добавлении live-refresh для
+' дочерних receipt-position строк "Заказы" - именно они впервые заставили выдачу реально дойти
+' до записи allocations в этой сборке): накопление строк в буферный Variant()-массив ("большой
+' массив + ReDim Preserve" ИЛИ Collection + копирование в массив фиксированного размера - оба
+' варианта проверены и оба ненадёжны) и последующее ЧТЕНИЕ его элемента как вложенного массива
+' (для setDataArray ИЛИ для поячейковой распаковки) в этой headless-сборке LibreOffice
+' непредсказуемо возвращает либо com.sun.star.uno.RuntimeException (StarBasic сообщает её как
+' "Object variable not set"), либо ТИХО пустой/повреждённый элемент (все поля превращаются в
+' "0" без единой ошибки) - подтверждено прямым чтением DB_PRIME_MOVEMENTS после "успешного"
+' проведения. Единственный многократно подтверждённый надёжный способ - вообще не буферизировать
+' строки: писать каждую allocation/movement СРАЗУ поячейково внутри цикла, в котором она
+' вычислена (тот же паттерн, что уже используется по всей кодовой базе для одиночных ячеек).
+' Для ISSUE это не является проблемой производительности - строк allocations/movements на один
+' документ выдачи по факту единицы-десятки (FIFO-разбиение по партиям одной строки), а не тысячи
+' (лимит в 1000 - для DOC_LINES, не для их FIFO-разбиения). PRIME_PostReceiptLines НЕ подвержен
+' этому дефекту (проверено) - там строки размером ровно plan.LineCount без промежуточной
+' буферизации-с-дозаписью, читаются один раз внутри одного And того же цикла, где строятся.
 Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim allocHeaders As Variant
     allocHeaders = PRIME_HeaderMap(SH_DB_ALLOCATIONS)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
 
-    Dim allocRowsBuf() As Variant
-    Dim moveRowsBuf() As Variant
-    Dim allocCount As Long, moveCount As Long
-    allocCount = 0 : moveCount = 0
-    ReDim allocRowsBuf(4000)
-    ReDim moveRowsBuf(4000)
+    Dim oAllocSheet As Object
+    oAllocSheet = PRIME_GetSheet(SH_DB_ALLOCATIONS)
+    Dim allocRow As Long
+    allocRow = PRIME_FindLastRow(oAllocSheet) + 1
+    Dim firstAllocDataRow As Long
+    firstAllocDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_ALLOCATIONS)
+    If allocRow < firstAllocDataRow Then allocRow = firstAllocDataRow
 
+    Dim oMoveSheet As Object
+    oMoveSheet = PRIME_GetSheet(SH_DB_MOVEMENTS)
+    Dim moveRow As Long
+    moveRow = PRIME_FindLastRow(oMoveSheet) + 1
+    Dim firstMoveDataRow As Long
+    firstMoveDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_MOVEMENTS)
+    If moveRow < firstMoveDataRow Then moveRow = firstMoveDataRow
+
+    Dim colAllocId As Long, colAllocDocLine As Long, colAllocLot As Long, colAllocQty As Long
+    colAllocId = PRIME_ColIndex(allocHeaders, "ALLOC_ID")
+    colAllocDocLine = PRIME_ColIndex(allocHeaders, "DOC_LINE_ID")
+    colAllocLot = PRIME_ColIndex(allocHeaders, "LOT_ID")
+    colAllocQty = PRIME_ColIndex(allocHeaders, "QTY_BASE")
+
+    Dim colMoveId As Long, colMoveDocId As Long, colMoveDocLine As Long, colMoveProduct As Long
+    Dim colMoveLot As Long, colMoveQty As Long, colMoveLocation As Long, colMoveDate As Long
+    Dim colMoveOpId As Long, colMoveContour As Long
+    colMoveId = PRIME_ColIndex(moveHeaders, "MOVE_ID")
+    colMoveDocId = PRIME_ColIndex(moveHeaders, "DOC_ID")
+    colMoveDocLine = PRIME_ColIndex(moveHeaders, "DOC_LINE_ID")
+    colMoveProduct = PRIME_ColIndex(moveHeaders, "PRODUCT_CODE")
+    colMoveLot = PRIME_ColIndex(moveHeaders, "LOT_ID")
+    colMoveQty = PRIME_ColIndex(moveHeaders, "QTY_BASE")
+    colMoveLocation = PRIME_ColIndex(moveHeaders, "LOCATION")
+    colMoveDate = PRIME_ColIndex(moveHeaders, "MOVE_DATE")
+    colMoveOpId = PRIME_ColIndex(moveHeaders, "OP_ID")
+    colMoveContour = PRIME_ColIndex(moveHeaders, "STOCK_CONTOUR")
+
+    Dim lots() As String
+    Dim balances() As Double
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        Dim lots() As String
-        Dim balances() As Double
         PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).Contour, lots, balances)
 
         Dim remaining As Double
@@ -761,15 +817,26 @@ Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, By
                 Dim take As Double
                 take = remaining
                 If balances(j) < take Then take = balances(j)
+                Dim lineId As String
+                lineId = PRIME_LineIdFor(i)
 
-                If allocCount > UBound(allocRowsBuf) Then ReDim Preserve allocRowsBuf(UBound(allocRowsBuf) + 4000)
-                allocRowsBuf(allocCount) = PRIME_BuildAllocationRow(allocHeaders, PRIME_LineIdFor(i), lots(j), take)
-                allocCount = allocCount + 1
+                oAllocSheet.getCellByPosition(colAllocId, allocRow).setString("ALC-" & lineId & "-" & lots(j))
+                oAllocSheet.getCellByPosition(colAllocDocLine, allocRow).setString(lineId)
+                oAllocSheet.getCellByPosition(colAllocLot, allocRow).setString(lots(j))
+                oAllocSheet.getCellByPosition(colAllocQty, allocRow).setValue(take)
+                allocRow = allocRow + 1
 
-                If moveCount > UBound(moveRowsBuf) Then ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
-                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                    lots(j), -take, plan.Lines(i).LocationFrom, plan.DocDate, opId, plan.Lines(i).Contour)
-                moveCount = moveCount + 1
+                oMoveSheet.getCellByPosition(colMoveId, moveRow).setString("MOV-" & Format(PRIME_SequenceNext("MOVE_ID"), "00000000"))
+                oMoveSheet.getCellByPosition(colMoveDocId, moveRow).setString(docId)
+                oMoveSheet.getCellByPosition(colMoveDocLine, moveRow).setString(lineId)
+                oMoveSheet.getCellByPosition(colMoveProduct, moveRow).setString(plan.Lines(i).ProductCode)
+                oMoveSheet.getCellByPosition(colMoveLot, moveRow).setString(lots(j))
+                oMoveSheet.getCellByPosition(colMoveQty, moveRow).setValue(-take)
+                oMoveSheet.getCellByPosition(colMoveLocation, moveRow).setString(plan.Lines(i).LocationFrom)
+                oMoveSheet.getCellByPosition(colMoveDate, moveRow).setString(plan.DocDate)
+                oMoveSheet.getCellByPosition(colMoveOpId, moveRow).setString(opId)
+                If colMoveContour >= 0 Then oMoveSheet.getCellByPosition(colMoveContour, moveRow).setString(plan.Lines(i).Contour)
+                moveRow = moveRow + 1
 
                 remaining = remaining - take
             End If
@@ -782,25 +849,8 @@ Private Sub PRIME_PostIssueLines(ByVal docId As String, ByVal opId As String, By
         End If
     Next i
 
-    If allocCount > 0 Then
-        ReDim Preserve allocRowsBuf(allocCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_ALLOCATIONS, allocRowsBuf)
-    End If
     PRIME_AuditLog(opId, STAGE_LOTS_WRITTEN, plan.SourceSheet, docId)
-    If moveCount > 0 Then
-        ReDim Preserve moveRowsBuf(moveCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
-    End If
 End Sub
-
-Private Function PRIME_BuildAllocationRow(ByVal headers As Variant, ByVal docLineId As String, ByVal lotId As String, ByVal qty As Double) As Variant
-    Dim row(UBound(headers)) As Variant
-    row(PRIME_ColIndex(headers, "ALLOC_ID")) = "ALC-" & docLineId & "-" & lotId
-    row(PRIME_ColIndex(headers, "DOC_LINE_ID")) = docLineId
-    row(PRIME_ColIndex(headers, "LOT_ID")) = lotId
-    row(PRIME_ColIndex(headers, "QTY_BASE")) = qty
-    PRIME_BuildAllocationRow = row
-End Function
 
 ' === RETURN: возврат симметричен FIFO-списанию исходной выдачи, allocation-aware (R08) ========
 ' 2.1.0 fix: раньше повторный частичный возврат снова проходил allocations исходной выдачи по
@@ -809,6 +859,12 @@ End Function
 ' следующей по очереди. Теперь для каждой allocation вычитается уже возвращённое по НЕЙ ЖЕ
 ' (DB_PRIME_RETURN_ALLOCATIONS, только COMMITTED) - остаток по каждой партии восстанавливается
 ' в правильном порядке, а не только правильной суммой.
+' headless_buffered_array_readback_corruption (2.1.2, см. подробное объяснение перед
+' PRIME_PostIssueLines) - здесь раньше строки накапливались в moveRowsBuf()/retAllocRowsBuf()
+' ("большой массив + ReDim Preserve") и передавались одним PRIME_AppendRowsBatch в конце; это
+' детерминированно писало на DB_PRIME_MOVEMENTS/DB_PRIME_RETURN_ALLOCATIONS пустые/нулевые строки
+' без единой ошибки (подтверждено прямым чтением содержимого листов после "успешного" возврата).
+' Фикс - как и в PostIssueLines: писать каждую строку сразу поячейково внутри цикла.
 Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
@@ -819,21 +875,53 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
     Dim retAllocHeaders As Variant
     If hasRetAlloc Then retAllocHeaders = PRIME_HeaderMap(SH_DB_RETURN_ALLOCATIONS)
 
-    Dim moveRowsBuf() As Variant
-    Dim retRowsBuf(plan.LineCount - 1) As Variant
-    Dim retAllocRowsBuf() As Variant
-    Dim moveCount As Long, retAllocCount As Long
-    moveCount = 0 : retAllocCount = 0
-    ReDim moveRowsBuf(4000)
-    ReDim retAllocRowsBuf(4000)
+    Dim oMoveSheet As Object
+    oMoveSheet = PRIME_GetSheet(SH_DB_MOVEMENTS)
+    Dim moveRow As Long
+    moveRow = PRIME_FindLastRow(oMoveSheet) + 1
+    Dim firstMoveDataRow As Long
+    firstMoveDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_MOVEMENTS)
+    If moveRow < firstMoveDataRow Then moveRow = firstMoveDataRow
 
+    Dim oRetSheet As Object
+    oRetSheet = PRIME_GetSheet(SH_DB_RETURNS)
+    Dim retRow As Long
+    retRow = PRIME_FindLastRow(oRetSheet) + 1
+    Dim firstRetDataRow As Long
+    firstRetDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_RETURNS)
+    If retRow < firstRetDataRow Then retRow = firstRetDataRow
+
+    Dim colRetId As Long, colRetOrigLine As Long, colRetDocId As Long, colRetQty As Long, colRetDate As Long, colRetOpId As Long
+    colRetId = PRIME_ColIndex(retHeaders, "RETURN_ID")
+    colRetOrigLine = PRIME_ColIndex(retHeaders, "ORIGINAL_ISSUE_DOC_LINE_ID")
+    colRetDocId = PRIME_ColIndex(retHeaders, "RETURN_DOC_ID")
+    colRetQty = PRIME_ColIndex(retHeaders, "QTY_BASE")
+    colRetDate = PRIME_ColIndex(retHeaders, "RETURN_DATE")
+    colRetOpId = PRIME_ColIndex(retHeaders, "OP_ID")
+
+    Dim oRetAllocSheet As Object
+    Dim retAllocRow As Long
+    Dim colAllocRetId As Long, colAllocId As Long, colAllocLot As Long, colAllocQty As Long, colAllocOpId As Long
+    If hasRetAlloc Then
+        oRetAllocSheet = PRIME_GetSheet(SH_DB_RETURN_ALLOCATIONS)
+        retAllocRow = PRIME_FindLastRow(oRetAllocSheet) + 1
+        Dim firstRetAllocDataRow As Long
+        firstRetAllocDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_RETURN_ALLOCATIONS)
+        If retAllocRow < firstRetAllocDataRow Then retAllocRow = firstRetAllocDataRow
+        colAllocRetId = PRIME_ColIndex(retAllocHeaders, "RETURN_ID")
+        colAllocId = PRIME_ColIndex(retAllocHeaders, "ALLOC_ID")
+        colAllocLot = PRIME_ColIndex(retAllocHeaders, "LOT_ID")
+        colAllocQty = PRIME_ColIndex(retAllocHeaders, "QTY_BASE")
+        colAllocOpId = PRIME_ColIndex(retAllocHeaders, "OP_ID")
+    End If
+
+    Dim lots() As String
+    Dim allocatedQty() As Double
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         Dim returnId As String
         returnId = docId & "-R" & (i + 1)
 
-        Dim lots() As String
-        Dim allocatedQty() As Double
         PRIME_AllocationsForDocLine(plan.Lines(i).OriginalDocLineId, lots, allocatedQty)
 
         Dim remaining As Double
@@ -859,13 +947,16 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
                     ' plan.Lines(i).LocationTo/.Contour (которые до этого фикса задавались как
                     ' общий дефолт для ВСЕЙ строки возврата и игнорировали, откуда именно был
                     ' списан каждый конкретный allocation).
-                    moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                        lots(j), take, PRIME_GetLotField(lots(j), "LOCATION"), plan.DocDate, opId, PRIME_GetLotField(lots(j), "STOCK_CONTOUR"))
-                    moveCount = moveCount + 1
+                    PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                        lots(j), take, PRIME_GetLotField(lots(j), "LOCATION"), plan.DocDate, opId, PRIME_GetLotField(lots(j), "STOCK_CONTOUR")
+                    moveRow = moveRow + 1
                     If hasRetAlloc Then
-                        If retAllocCount > UBound(retAllocRowsBuf) Then ReDim Preserve retAllocRowsBuf(UBound(retAllocRowsBuf) + 4000)
-                        retAllocRowsBuf(retAllocCount) = PRIME_BuildReturnAllocationRow(retAllocHeaders, returnId, allocId, lots(j), take, opId)
-                        retAllocCount = retAllocCount + 1
+                        oRetAllocSheet.getCellByPosition(colAllocRetId, retAllocRow).setString(returnId)
+                        oRetAllocSheet.getCellByPosition(colAllocId, retAllocRow).setString(allocId)
+                        oRetAllocSheet.getCellByPosition(colAllocLot, retAllocRow).setString(lots(j))
+                        oRetAllocSheet.getCellByPosition(colAllocQty, retAllocRow).setValue(take)
+                        If colAllocOpId >= 0 Then oRetAllocSheet.getCellByPosition(colAllocOpId, retAllocRow).setString(opId)
+                        retAllocRow = retAllocRow + 1
                     End If
                     remaining = remaining - take
                 End If
@@ -875,44 +966,20 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
             ' Исходная выдача не найдена по allocations (например, легаси-данные без миграции
             ' allocations) - возврат всё равно проводим на условное "безлотовое" движение,
             ' чтобы не заблокировать документ, но это ухудшает трассируемость партии.
-            moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                "", remaining, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
-            moveCount = moveCount + 1
+            PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                "", remaining, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour
+            moveRow = moveRow + 1
         End If
 
-        Dim retRow(UBound(retHeaders)) As Variant
-        retRow(PRIME_ColIndex(retHeaders, "RETURN_ID")) = returnId
-        retRow(PRIME_ColIndex(retHeaders, "ORIGINAL_ISSUE_DOC_LINE_ID")) = plan.Lines(i).OriginalDocLineId
-        retRow(PRIME_ColIndex(retHeaders, "RETURN_DOC_ID")) = docId
-        retRow(PRIME_ColIndex(retHeaders, "QTY_BASE")) = plan.Lines(i).QtyBase
-        retRow(PRIME_ColIndex(retHeaders, "RETURN_DATE")) = plan.DocDate
-        Dim colOpIdRet As Long
-        colOpIdRet = PRIME_ColIndex(retHeaders, "OP_ID")
-        If colOpIdRet >= 0 Then retRow(colOpIdRet) = opId
-        retRowsBuf(i) = retRow
+        oRetSheet.getCellByPosition(colRetId, retRow).setString(returnId)
+        oRetSheet.getCellByPosition(colRetOrigLine, retRow).setString(plan.Lines(i).OriginalDocLineId)
+        oRetSheet.getCellByPosition(colRetDocId, retRow).setString(docId)
+        oRetSheet.getCellByPosition(colRetQty, retRow).setValue(plan.Lines(i).QtyBase)
+        oRetSheet.getCellByPosition(colRetDate, retRow).setString(plan.DocDate)
+        If colRetOpId >= 0 Then oRetSheet.getCellByPosition(colRetOpId, retRow).setString(opId)
+        retRow = retRow + 1
     Next i
-
-    If moveCount > 0 Then
-        ReDim Preserve moveRowsBuf(moveCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
-    End If
-    PRIME_AppendRowsBatch(SH_DB_RETURNS, retRowsBuf)
-    If hasRetAlloc And retAllocCount > 0 Then
-        ReDim Preserve retAllocRowsBuf(retAllocCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_RETURN_ALLOCATIONS, retAllocRowsBuf)
-    End If
 End Sub
-
-Private Function PRIME_BuildReturnAllocationRow(ByVal headers As Variant, ByVal returnId As String, ByVal allocId As String, _
-        ByVal lotId As String, ByVal qty As Double, ByVal opId As String) As Variant
-    Dim row(UBound(headers)) As Variant
-    row(PRIME_ColIndex(headers, "RETURN_ID")) = returnId
-    row(PRIME_ColIndex(headers, "ALLOC_ID")) = allocId
-    row(PRIME_ColIndex(headers, "LOT_ID")) = lotId
-    row(PRIME_ColIndex(headers, "QTY_BASE")) = qty
-    row(PRIME_ColIndex(headers, "OP_ID")) = opId
-    PRIME_BuildReturnAllocationRow = row
-End Function
 
 ' R08: сколько уже COMMITTED-возвращено по конкретной allocation (не по всей строке выдачи).
 Public Function PRIME_AlreadyReturnedForAllocation(ByVal allocId As String) As Double
@@ -949,23 +1016,51 @@ End Function
 ' как отдельную партию (R05/R06). Теперь для каждого куска, взятого из исходной партии по FIFO,
 ' создаётся НОВАЯ партия-назначение с PARENT_LOT_ID=исходная (полная трассируемость), и именно
 ' она увеличивает остаток в новом месте/контуре.
+' headless_buffered_array_readback_corruption (2.1.2, см. подробное объяснение перед
+' PRIME_PostIssueLines) - раньше строки накапливались в moveRowsBuf()/lotRowsBuf() и передавались
+' одним PRIME_AppendRowsBatch в конце; фикс - писать каждую строку сразу поячейково внутри цикла.
 Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
     Dim lotHeaders As Variant
     lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
 
-    Dim moveRowsBuf() As Variant
-    Dim lotRowsBuf() As Variant
-    Dim moveCount As Long, lotCount As Long
-    moveCount = 0 : lotCount = 0
-    ReDim moveRowsBuf(4000)
-    ReDim lotRowsBuf(4000)
+    Dim oMoveSheet As Object
+    oMoveSheet = PRIME_GetSheet(SH_DB_MOVEMENTS)
+    Dim moveRow As Long
+    moveRow = PRIME_FindLastRow(oMoveSheet) + 1
+    Dim firstMoveDataRow As Long
+    firstMoveDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_MOVEMENTS)
+    If moveRow < firstMoveDataRow Then moveRow = firstMoveDataRow
 
+    Dim oLotSheet As Object
+    oLotSheet = PRIME_GetSheet(SH_DB_LOTS)
+    Dim lotRow As Long
+    lotRow = PRIME_FindLastRow(oLotSheet) + 1
+    Dim firstLotDataRow As Long
+    firstLotDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_LOTS)
+    If lotRow < firstLotDataRow Then lotRow = firstLotDataRow
+
+    Dim colLotId As Long, colLotProduct As Long, colLotRecDoc As Long, colLotRecLine As Long, colLotRecDate As Long
+    Dim colLotLoc As Long, colLotOrigQty As Long, colLotUnit As Long, colLotOrigin As Long, colLotOrderId As Long
+    Dim colLotContour As Long, colLotParent As Long
+    colLotId = PRIME_ColIndex(lotHeaders, "LOT_ID")
+    colLotProduct = PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")
+    colLotRecDoc = PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")
+    colLotRecLine = PRIME_ColIndex(lotHeaders, "RECEIPT_LINE_ID")
+    colLotRecDate = PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")
+    colLotLoc = PRIME_ColIndex(lotHeaders, "LOCATION")
+    colLotOrigQty = PRIME_ColIndex(lotHeaders, "ORIGINAL_QTY_BASE")
+    colLotUnit = PRIME_ColIndex(lotHeaders, "BASE_UNIT")
+    colLotOrigin = PRIME_ColIndex(lotHeaders, "ORIGIN")
+    colLotOrderId = PRIME_ColIndex(lotHeaders, "ORDER_ID")
+    colLotContour = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
+    colLotParent = PRIME_ColIndex(lotHeaders, "PARENT_LOT_ID")
+
+    Dim lots() As String
+    Dim balances() As Double
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        Dim lots() As String
-        Dim balances() As Double
         PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).ContourFrom, lots, balances)
 
         Dim remaining As Double
@@ -978,12 +1073,9 @@ Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String,
                 take = remaining
                 If balances(j) < take Then take = balances(j)
 
-                If moveCount > UBound(moveRowsBuf) - 1 Then
-                    ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
-                End If
-                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                    lots(j), -take, plan.Lines(i).LocationFrom, plan.DocDate, opId, plan.Lines(i).ContourFrom)
-                moveCount = moveCount + 1
+                PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                    lots(j), -take, plan.Lines(i).LocationFrom, plan.DocDate, opId, plan.Lines(i).ContourFrom
+                moveRow = moveRow + 1
 
                 Dim destLotId As String
                 destLotId = "LOT-" & Format(PRIME_SequenceNext("LOT_ID"), "00000000")
@@ -991,30 +1083,23 @@ Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String,
                 srcReceiptDate = PRIME_GetLotField(lots(j), "RECEIPT_DATE")
                 If srcReceiptDate = "" Then srcReceiptDate = plan.DocDate
 
-                If lotCount > UBound(lotRowsBuf) Then ReDim Preserve lotRowsBuf(UBound(lotRowsBuf) + 4000)
-                Dim lotRow(UBound(lotHeaders)) As Variant
-                lotRow(PRIME_ColIndex(lotHeaders, "LOT_ID")) = destLotId
-                lotRow(PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")) = plan.Lines(i).ProductCode
-                lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")) = docId
-                lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_LINE_ID")) = PRIME_LineIdFor(i)
-                lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")) = srcReceiptDate ' сохраняем возраст партии для FIFO
-                lotRow(PRIME_ColIndex(lotHeaders, "LOCATION")) = plan.Lines(i).LocationTo
-                lotRow(PRIME_ColIndex(lotHeaders, "ORIGINAL_QTY_BASE")) = take
-                lotRow(PRIME_ColIndex(lotHeaders, "BASE_UNIT")) = PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT")
-                lotRow(PRIME_ColIndex(lotHeaders, "ORIGIN")) = "TRANSFER"
-                lotRow(PRIME_ColIndex(lotHeaders, "ORDER_ID")) = ""
-                Dim colContourTo As Long
-                colContourTo = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
-                If colContourTo >= 0 Then lotRow(colContourTo) = plan.Lines(i).ContourTo
-                Dim colParent As Long
-                colParent = PRIME_ColIndex(lotHeaders, "PARENT_LOT_ID")
-                If colParent >= 0 Then lotRow(colParent) = lots(j)
-                lotRowsBuf(lotCount) = lotRow
-                lotCount = lotCount + 1
+                oLotSheet.getCellByPosition(colLotId, lotRow).setString(destLotId)
+                oLotSheet.getCellByPosition(colLotProduct, lotRow).setString(plan.Lines(i).ProductCode)
+                oLotSheet.getCellByPosition(colLotRecDoc, lotRow).setString(docId)
+                oLotSheet.getCellByPosition(colLotRecLine, lotRow).setString(PRIME_LineIdFor(i))
+                oLotSheet.getCellByPosition(colLotRecDate, lotRow).setString(srcReceiptDate) ' сохраняем возраст партии для FIFO
+                oLotSheet.getCellByPosition(colLotLoc, lotRow).setString(plan.Lines(i).LocationTo)
+                oLotSheet.getCellByPosition(colLotOrigQty, lotRow).setValue(take)
+                oLotSheet.getCellByPosition(colLotUnit, lotRow).setString(PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT"))
+                oLotSheet.getCellByPosition(colLotOrigin, lotRow).setString("TRANSFER")
+                oLotSheet.getCellByPosition(colLotOrderId, lotRow).setString("")
+                If colLotContour >= 0 Then oLotSheet.getCellByPosition(colLotContour, lotRow).setString(plan.Lines(i).ContourTo)
+                If colLotParent >= 0 Then oLotSheet.getCellByPosition(colLotParent, lotRow).setString(lots(j))
+                lotRow = lotRow + 1
 
-                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                    destLotId, take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).ContourTo)
-                moveCount = moveCount + 1
+                PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                    destLotId, take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).ContourTo
+                moveRow = moveRow + 1
 
                 remaining = remaining - take
             End If
@@ -1025,15 +1110,7 @@ Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String,
         End If
     Next i
 
-    If lotCount > 0 Then
-        ReDim Preserve lotRowsBuf(lotCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_LOTS, lotRowsBuf)
-    End If
     PRIME_AuditLog(opId, STAGE_LOTS_WRITTEN, plan.SourceSheet, docId)
-    If moveCount > 0 Then
-        ReDim Preserve moveRowsBuf(moveCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
-    End If
 End Sub
 
 ' === ADJUSTMENT: инвентаризация, lot-consistent (R06) ==========================================
@@ -1041,51 +1118,74 @@ End Sub
 ' партийным FIFO (stock по месту менялся, а сумма балансов партий - нет). Теперь недостача
 ' списывается СО СПЕЦИФИЧНЫХ партий по FIFO (как обычное списание), а излишек создаёт НОВУЮ
 ' партию происхождения "ADJUSTMENT" - после проведения stock == sum(lot balances) гарантированно.
+' headless_buffered_array_readback_corruption (2.1.2, см. подробное объяснение перед
+' PRIME_PostIssueLines) - раньше строки накапливались в moveRowsBuf()/lotRowsBuf() и передавались
+' одним PRIME_AppendRowsBatch в конце; фикс - писать каждую строку сразу поячейково внутри цикла.
 Private Sub PRIME_PostAdjustmentLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
     Dim lotHeaders As Variant
     lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
 
-    Dim moveRowsBuf() As Variant
-    Dim lotRowsBuf() As Variant
-    Dim moveCount As Long, lotCount As Long
-    moveCount = 0 : lotCount = 0
-    ReDim moveRowsBuf(4000)
-    ReDim lotRowsBuf(plan.LineCount)
+    Dim oMoveSheet As Object
+    oMoveSheet = PRIME_GetSheet(SH_DB_MOVEMENTS)
+    Dim moveRow As Long
+    moveRow = PRIME_FindLastRow(oMoveSheet) + 1
+    Dim firstMoveDataRow As Long
+    firstMoveDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_MOVEMENTS)
+    If moveRow < firstMoveDataRow Then moveRow = firstMoveDataRow
 
+    Dim oLotSheet As Object
+    oLotSheet = PRIME_GetSheet(SH_DB_LOTS)
+    Dim lotRow As Long
+    lotRow = PRIME_FindLastRow(oLotSheet) + 1
+    Dim firstLotDataRow As Long
+    firstLotDataRow = PRIME_FormSchemaFirstDataRow(SH_DB_LOTS)
+    If lotRow < firstLotDataRow Then lotRow = firstLotDataRow
+
+    Dim colLotId As Long, colLotProduct As Long, colLotRecDoc As Long, colLotRecLine As Long, colLotRecDate As Long
+    Dim colLotLoc As Long, colLotOrigQty As Long, colLotUnit As Long, colLotOrigin As Long, colLotOrderId As Long
+    Dim colLotContour As Long
+    colLotId = PRIME_ColIndex(lotHeaders, "LOT_ID")
+    colLotProduct = PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")
+    colLotRecDoc = PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")
+    colLotRecLine = PRIME_ColIndex(lotHeaders, "RECEIPT_LINE_ID")
+    colLotRecDate = PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")
+    colLotLoc = PRIME_ColIndex(lotHeaders, "LOCATION")
+    colLotOrigQty = PRIME_ColIndex(lotHeaders, "ORIGINAL_QTY_BASE")
+    colLotUnit = PRIME_ColIndex(lotHeaders, "BASE_UNIT")
+    colLotOrigin = PRIME_ColIndex(lotHeaders, "ORIGIN")
+    colLotOrderId = PRIME_ColIndex(lotHeaders, "ORDER_ID")
+    colLotContour = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
+
+    Dim lots() As String
+    Dim balances() As Double
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         If plan.Lines(i).QtyBase > 0 Then
             ' Излишек - новая партия происхождения "ADJUSTMENT".
             Dim newLotId As String
             newLotId = "LOT-" & Format(PRIME_SequenceNext("LOT_ID"), "00000000")
-            Dim lotRow(UBound(lotHeaders)) As Variant
-            lotRow(PRIME_ColIndex(lotHeaders, "LOT_ID")) = newLotId
-            lotRow(PRIME_ColIndex(lotHeaders, "PRODUCT_CODE")) = plan.Lines(i).ProductCode
-            lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")) = docId
-            lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_LINE_ID")) = PRIME_LineIdFor(i)
-            lotRow(PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")) = plan.DocDate
-            lotRow(PRIME_ColIndex(lotHeaders, "LOCATION")) = plan.Lines(i).LocationTo
-            lotRow(PRIME_ColIndex(lotHeaders, "ORIGINAL_QTY_BASE")) = plan.Lines(i).QtyBase
-            lotRow(PRIME_ColIndex(lotHeaders, "BASE_UNIT")) = PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT")
-            lotRow(PRIME_ColIndex(lotHeaders, "ORIGIN")) = "ADJUSTMENT"
-            lotRow(PRIME_ColIndex(lotHeaders, "ORDER_ID")) = ""
-            Dim colContourAdj As Long
-            colContourAdj = PRIME_ColIndex(lotHeaders, "STOCK_CONTOUR")
-            If colContourAdj >= 0 Then lotRow(colContourAdj) = plan.Lines(i).Contour
-            lotRowsBuf(lotCount) = lotRow
-            lotCount = lotCount + 1
+            oLotSheet.getCellByPosition(colLotId, lotRow).setString(newLotId)
+            oLotSheet.getCellByPosition(colLotProduct, lotRow).setString(plan.Lines(i).ProductCode)
+            oLotSheet.getCellByPosition(colLotRecDoc, lotRow).setString(docId)
+            oLotSheet.getCellByPosition(colLotRecLine, lotRow).setString(PRIME_LineIdFor(i))
+            oLotSheet.getCellByPosition(colLotRecDate, lotRow).setString(plan.DocDate)
+            oLotSheet.getCellByPosition(colLotLoc, lotRow).setString(plan.Lines(i).LocationTo)
+            oLotSheet.getCellByPosition(colLotOrigQty, lotRow).setValue(plan.Lines(i).QtyBase)
+            oLotSheet.getCellByPosition(colLotUnit, lotRow).setString(PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT"))
+            oLotSheet.getCellByPosition(colLotOrigin, lotRow).setString("ADJUSTMENT")
+            oLotSheet.getCellByPosition(colLotOrderId, lotRow).setString("")
+            If colLotContour >= 0 Then oLotSheet.getCellByPosition(colLotContour, lotRow).setString(plan.Lines(i).Contour)
+            lotRow = lotRow + 1
 
-            moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                newLotId, plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
-            moveCount = moveCount + 1
+            PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                newLotId, plan.Lines(i).QtyBase, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour
+            moveRow = moveRow + 1
         Else
             ' Недостача - списываем со специфичных партий по FIFO (место+контур), как ISSUE.
             Dim shortage As Double
             shortage = -plan.Lines(i).QtyBase
-            Dim lots() As String
-            Dim balances() As Double
             PRIME_FifoLotsForProduct(plan.Lines(i).ProductCode, plan.Lines(i).LocationTo, plan.Lines(i).Contour, lots, balances)
             Dim j As Long
             For j = LBound(lots) To UBound(lots)
@@ -1094,10 +1194,9 @@ Private Sub PRIME_PostAdjustmentLines(ByVal docId As String, ByVal opId As Strin
                     Dim take As Double
                     take = shortage
                     If balances(j) < take Then take = balances(j)
-                    If moveCount > UBound(moveRowsBuf) Then ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
-                    moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                        lots(j), -take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
-                    moveCount = moveCount + 1
+                    PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
+                        lots(j), -take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour
+                    moveRow = moveRow + 1
                     shortage = shortage - take
                 End If
             Next j
@@ -1113,15 +1212,27 @@ Private Sub PRIME_PostAdjustmentLines(ByVal docId As String, ByVal opId As Strin
             End If
         End If
     Next i
+End Sub
 
-    If lotCount > 0 Then
-        ReDim Preserve lotRowsBuf(lotCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_LOTS, lotRowsBuf)
-    End If
-    If moveCount > 0 Then
-        ReDim Preserve moveRowsBuf(moveCount - 1)
-        PRIME_AppendRowsBatch(SH_DB_MOVEMENTS, moveRowsBuf)
-    End If
+' headless_buffered_array_readback_corruption (2.1.2): аналог PRIME_BuildMovementRow, но пишет
+' строку СРАЗУ в ячейки указанного row, а не возвращает Variant()-массив для последующей
+' буферизации - используется всеми Post*Lines, которые пишут больше одного движения на строку
+' документа (Return/Transfer/Adjustment), см. подробности перед PRIME_PostIssueLines.
+Private Sub PRIME_WriteMovementRow(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, ByVal docId As String, _
+        ByVal docLineId As String, ByVal productCode As String, ByVal lotId As String, ByVal qtyBase As Double, _
+        ByVal location As String, ByVal moveDate As String, ByVal opId As String, ByVal stockContour As String)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "MOVE_ID"), row).setString("MOV-" & Format(PRIME_SequenceNext("MOVE_ID"), "00000000"))
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "DOC_ID"), row).setString(docId)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "DOC_LINE_ID"), row).setString(docLineId)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "PRODUCT_CODE"), row).setString(productCode)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "LOT_ID"), row).setString(lotId)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "QTY_BASE"), row).setValue(qtyBase)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "LOCATION"), row).setString(location)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "MOVE_DATE"), row).setString(moveDate)
+    oSheet.getCellByPosition(PRIME_ColIndex(headers, "OP_ID"), row).setString(opId)
+    Dim colContour As Long
+    colContour = PRIME_ColIndex(headers, "STOCK_CONTOUR")
+    If colContour >= 0 Then oSheet.getCellByPosition(colContour, row).setString(stockContour)
 End Sub
 
 Private Function PRIME_BuildMovementRow(ByVal headers As Variant, ByVal docId As String, ByVal docLineId As String, _
@@ -1317,6 +1428,84 @@ Public Function PRIME_GetLotField(ByVal lotId As String, ByVal fieldName As Stri
     Else
         PRIME_GetLotField = CStr(table(idx)(colField))
     End If
+End Function
+
+' orders_must_show_receipt_positions_directly (2.1.2): с 2.1.1 каждый PRODUCT_CODE (ЕИ-код)
+' соответствует РОВНО одной партии (LOT_ID) - нужна для дочерних receipt-position строк "Заказы",
+' которым известен только ЕИ-код (PRODUCT_CODE), а суммы по движениям/возвратам в
+' DB_PRIME_MOVEMENTS/DB_PRIME_RETURN_ALLOCATIONS ведутся по LOT_ID.
+Public Function PRIME_LotIdForProductCode(ByVal productCode As String) As String
+    PRIME_LotIdForProductCode = ""
+    If productCode = "" Or Not PRIME_SheetExists(SH_DB_LOTS) Then Exit Function
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_DB_LOTS)
+    Dim colCode As Long, colLotId As Long
+    colCode = PRIME_ColIndex(headers, "PRODUCT_CODE")
+    colLotId = PRIME_ColIndex(headers, "LOT_ID")
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_DB_LOTS)
+    If UBound(table) < 1 Then Exit Function
+    Dim i As Long
+    For i = 1 To UBound(table)
+        If CStr(table(i)(colCode)) = productCode Then
+            PRIME_LotIdForProductCode = CStr(table(i)(colLotId))
+            Exit Function
+        End If
+    Next i
+End Function
+
+' Сумма COMMITTED списаний (отрицательных движений) с конкретной партии - информационный показ
+' "Выдано" на дочерней receipt-position строке "Заказы" (2.1.2).
+Public Function PRIME_IssuedQtyForLot(ByVal lotId As String) As Double
+    PRIME_IssuedQtyForLot = 0
+    If lotId = "" Or Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then Exit Function
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_DB_MOVEMENTS)
+    Dim colLot As Long, colQty As Long, colOpId As Long
+    colLot = PRIME_ColIndex(headers, "LOT_ID")
+    colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_DB_MOVEMENTS)
+    If UBound(table) < 1 Then Exit Function
+    Dim total As Double
+    total = 0
+    Dim i As Long
+    For i = 1 To UBound(table)
+        If CStr(table(i)(colLot)) = lotId Then
+            Dim qty As Double
+            qty = CDbl(table(i)(colQty))
+            If qty < 0 And PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
+                total = total + (-qty)
+            End If
+        End If
+    Next i
+    PRIME_IssuedQtyForLot = total
+End Function
+
+' Сумма COMMITTED возвратов на конкретную партию (по DB_PRIME_RETURN_ALLOCATIONS) -
+' информационный показ "Возвращено" на дочерней receipt-position строке "Заказы" (2.1.2).
+Public Function PRIME_ReturnedQtyForLot(ByVal lotId As String) As Double
+    PRIME_ReturnedQtyForLot = 0
+    If lotId = "" Or Not PRIME_SheetExists(SH_DB_RETURN_ALLOCATIONS) Then Exit Function
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_DB_RETURN_ALLOCATIONS)
+    Dim colLot As Long, colQty As Long, colOpId As Long
+    colLot = PRIME_ColIndex(headers, "LOT_ID")
+    colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_DB_RETURN_ALLOCATIONS)
+    If UBound(table) < 1 Then Exit Function
+    Dim total As Double
+    total = 0
+    Dim i As Long
+    For i = 1 To UBound(table)
+        If CStr(table(i)(colLot)) = lotId And PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
+            total = total + CDbl(table(i)(colQty))
+        End If
+    Next i
+    PRIME_ReturnedQtyForLot = total
 End Function
 
 ' Разбиение исходной строки выдачи по партиям (для симметричного возврата).
