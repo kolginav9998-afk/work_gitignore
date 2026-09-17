@@ -297,6 +297,9 @@ End Sub
 ' file store() (например, 126 строк одной поставки = 126 сохранений файла, без атомарности "весь
 ' приход целиком или никак"). PRIME_PostReceiptLines и так строит партию/движение на КАЖДУЮ
 ' строку плана - здесь просто перестаём вызывать PostDocument в цикле по одной строке.
+' batch_invalid_line fix (2.1.1): заполненная, но невалидная строка (PRIME_Orders_BuildReceiptLine
+' вернула False - например, некорректное количество) теперь останавливает построение всего
+' батча, а не молча исключается из него (см. тот же паттерн у PRIME_Issues_ConductAllButton).
 Public Sub PRIME_Orders_ConductAllReadyButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_ORDERS)
@@ -322,19 +325,20 @@ Public Sub PRIME_Orders_ConductAllReadyButton()
         If Trim(oSheet.getCellByPosition(colFact, r).getString()) <> "" Then
             Dim docLine As PrimeDocLine
             Dim rowOrderId As String, rowDeliveryKey As String
-            If PRIME_Orders_BuildReceiptLine(oSheet, headers, r, docLine, rowOrderId, rowDeliveryKey) Then
-                If plan.LineCount = 0 Then
-                    PRIME_InitPlan(plan, DOC_RECEIPT, SH_ORDERS, "")
-                    commonOrderId = rowOrderId
-                ElseIf rowOrderId <> commonOrderId Then
-                    orderIdsDiffer = True
-                End If
-                batchKey = batchKey & rowDeliveryKey & ","
-                rowForLine(plan.LineCount) = r
-                factQtyForLine(plan.LineCount) = docLine.QtyInput
-                newProductRowForLine(plan.LineCount) = (docLine.ProductCode = "")
-                PRIME_PlanAddLine(plan, docLine)
+            If Not PRIME_Orders_BuildReceiptLine(oSheet, headers, r, docLine, rowOrderId, rowDeliveryKey) Then
+                Exit Sub
             End If
+            If plan.LineCount = 0 Then
+                PRIME_InitPlan(plan, DOC_RECEIPT, SH_ORDERS, "")
+                commonOrderId = rowOrderId
+            ElseIf rowOrderId <> commonOrderId Then
+                orderIdsDiffer = True
+            End If
+            batchKey = batchKey & rowDeliveryKey & ","
+            rowForLine(plan.LineCount) = r
+            factQtyForLine(plan.LineCount) = docLine.QtyInput
+            newProductRowForLine(plan.LineCount) = (docLine.ProductCode = "")
+            PRIME_PlanAddLine(plan, docLine)
         End If
     Next r
 

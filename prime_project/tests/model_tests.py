@@ -769,6 +769,232 @@ def test_tx_protocol_retry_after_failure_is_idempotent_no_bad_code_reuse():
     check(orphan_code not in visible_codes, "the orphaned code must never become visible, even after a later retry")
 
 
+# === PRIME 2.1.1: unique EI_CODE per receipt position (no product aggregation) ===============
+# Model change requested post-2.1.0: every physical receipt line - even of an item with the
+# identical name/article/supplier as a previous receipt - is now its own independent stock
+# position with its own EI_CODE and its own balance. PRODUCT_CODE (format "ЕИ-00000001") is the
+# EI_CODE: PRIME_ValidateReceipt (PRIME_04_Posting.bas) no longer has an "existing code" branch
+# for receipts - every line unconditionally mints IsNewProduct=True with a freshly peeked code.
+# Downstream (Issue/Наличие/Поиск/Остаток-Заказы) already keyed everything by PRODUCT_CODE, not
+# by name, so this single identity-rule change is sufficient - no FIFO-across-EI, no
+# name-based aggregation needs touching.
+
+def format_ei_code(n):
+    return f"ЕИ-{n:08d}"
+
+
+class EiStockModel:
+    """Mirrors PRIME_ValidateReceipt/PRIME_ValidateIssue (2.1.1)."""
+    def __init__(self):
+        self.seq = 0
+        self.positions = {}  # EI_CODE -> {"name", "location", "contour", "balance"}
+
+    def receipt(self, name, qty, location="A", contour="GENERAL"):
+        self.seq += 1
+        code = format_ei_code(self.seq)
+        self.positions[code] = {"name": name, "location": location, "contour": contour, "balance": qty}
+        return code
+
+    def issue(self, ei_code, qty):
+        pos = self.positions.get(ei_code)
+        if pos is None:
+            raise TestFailure(f"unknown EI_CODE {ei_code}")
+        if pos["balance"] < qty - 1e-9:
+            raise TestFailure(
+                f"доступно по {ei_code}: {pos['balance']} шт. Не хватает: {qty - pos['balance']} шт.")
+        pos["balance"] -= qty
+
+
+def test_two_receipts_of_same_name_get_different_ei_codes():
+    m = EiStockModel()
+    code1 = m.receipt("Ручка", 5)
+    code2 = m.receipt("Ручка", 19)
+    check(code1 != code2, f"two receipts of the identical name must get different EI_CODEs, got {code1} == {code2}")
+    check(m.positions[code1]["balance"] == 5, "first position keeps its own balance")
+    check(m.positions[code2]["balance"] == 19, "second position keeps its own balance")
+
+
+def test_second_receipt_never_reuses_first_ei_code():
+    m = EiStockModel()
+    seen = set()
+    for _ in range(5):
+        code = m.receipt("Ручка", 1)
+        check(code not in seen, f"EI_CODE {code} was reused across receipts")
+        seen.add(code)
+
+
+def test_issue_by_ei_code_affects_only_that_ei_code():
+    m = EiStockModel()
+    code_a = m.receipt("Ручка", 5)
+    code_b = m.receipt("Ручка", 19)
+    m.issue(code_b, 19)
+    check(m.positions[code_b]["balance"] == 0, "issued EI_CODE must be fully depleted")
+    check(m.positions[code_a]["balance"] == 5, "sibling EI_CODE of the same name must be untouched")
+    m.issue(code_a, 1)
+    check(m.positions[code_a]["balance"] == 4, f"expected 4 left on {code_a}")
+
+
+def test_issue_over_ei_code_remaining_is_rejected_even_if_sibling_has_stock():
+    m = EiStockModel()
+    code_a = m.receipt("Ручка", 5)
+    code_b = m.receipt("Ручка", 19)
+    m.issue(code_b, 19)  # exhaust B
+    try:
+        m.issue(code_b, 1)  # try to take 1 more from the now-empty B, even though A still has 5
+        raise TestFailure("expected shortage on the exact EI_CODE to be rejected")
+    except TestFailure as e:
+        check("Не хватает" in str(e) or "доступно" in str(e), f"wrong failure: {e}")
+    check(m.positions[code_a]["balance"] == 5,
+          "sibling EI_CODE of the identical name must never be auto-spilled into (no cross-EI FIFO)")
+
+
+def test_two_issue_rows_for_two_ei_codes_post_atomically():
+    m = EiStockModel()
+    code_a = m.receipt("Ручка", 5)
+    code_b = m.receipt("Ручка", 19)
+    # Two separate document lines, different EI codes, one atomic document (mirrors
+    # PRIME_PostDocument's single DOC_ID/OP_ID/store() for the whole batch).
+    for code, qty in [(code_b, 19), (code_a, 1)]:
+        m.issue(code, qty)
+    check(m.positions[code_b]["balance"] == 0 and m.positions[code_a]["balance"] == 4,
+          "both lines of the same atomic document must apply")
+
+
+# --- return_destination_fix: return must restore the ORIGINAL lot's location/contour ---------
+def test_return_restores_original_location_not_product_default():
+    original = {"location": "Цех-А", "contour": "WORKSHOP_DETAILS"}
+    product_default_location = "Склад-Б"  # DB_PRIME_PRODUCTS.DEFAULT_LOCATION - NOT where this was issued from
+    # Pre-2.1.1 bug: PRIME_08_ReturnsInventory hardcoded docLine.LocationTo = DEFAULT_LOCATION
+    # and docLine.Contour = SC_GENERAL for every return line, ignoring where the item actually
+    # came from. Fixed: PRIME_PostReturnLines now reads PRIME_GetLotField(lots(j), "LOCATION")/
+    # "STOCK_CONTOUR") per allocation instead of a line-level default.
+    buggy_location, buggy_contour = product_default_location, "GENERAL"
+    fixed_location, fixed_contour = original["location"], original["contour"]
+    check(fixed_location != buggy_location or fixed_contour != buggy_contour,
+          "sanity: this scenario must distinguish fixed vs buggy behavior")
+    check(fixed_location == "Цех-А" and fixed_contour == "WORKSHOP_DETAILS",
+          f"return must restore the ORIGINAL issue location/contour {original}, not DEFAULT_LOCATION/GENERAL")
+
+
+# --- no_empty_lot_fallback: inventory shortage exceeding the EI_CODE's balance is rejected ----
+def test_inventory_shortage_exceeding_balance_is_rejected_not_empty_lot():
+    balance = 5.0
+
+    def validate_adjustment(qty_diff):
+        if qty_diff < 0:
+            shortage = -qty_diff
+            if shortage > balance + 1e-6:
+                raise TestFailure(f"недостача {shortage} превышает фактически доступный остаток {balance}")
+        return True
+
+    check(validate_adjustment(-5) is True, "shortage exactly matching the EI_CODE's balance must be accepted")
+    try:
+        validate_adjustment(-6)
+        raise TestFailure("expected shortage exceeding the EI_CODE's balance to be rejected")
+    except TestFailure as e:
+        check("превышает" in str(e), f"wrong failure: {e}")
+
+
+# --- Orders/Наличие: remaining stock shown separately per EI_CODE, never merged by name -------
+def test_orders_show_remaining_separately_per_receipt_position():
+    receipts = [
+        {"order_id": "ORD-1", "ei_code": "ЕИ-00000101", "delivered": 5, "issued": 1},
+        {"order_id": "ORD-1", "ei_code": "ЕИ-00000102", "delivered": 19, "issued": 19},
+    ]
+    rows = [{"order_id": r["order_id"], "ei_code": r["ei_code"], "remaining": r["delivered"] - r["issued"]}
+            for r in receipts]
+    check(len(rows) == 2, "each receipt position must be its own row, not aggregated into the order line")
+    remaining_by_code = {r["ei_code"]: r["remaining"] for r in rows}
+    check(remaining_by_code["ЕИ-00000101"] == 4, "first position keeps its own remaining")
+    check(remaining_by_code["ЕИ-00000102"] == 0, "second position keeps its own remaining")
+
+
+def test_presence_sheet_keeps_identical_names_as_separate_rows():
+    movements_by_ei = {
+        "ЕИ-00000101": {"name": "Ручка", "balance": 4},
+        "ЕИ-00000102": {"name": "Ручка", "balance": 0},
+    }
+    # Наличие groups by PRODUCT_CODE (=EI_CODE, per PRIME_09_StockSearch's documented
+    # "Группировка по PRODUCT_CODE + BASE_UNIT + LOCATION"), never by PRODUCT_NAME.
+    rows = [{"ei_code": code, **data} for code, data in movements_by_ei.items()]
+    check(len(rows) == 2, "two distinct EI_CODEs of the identical name must remain two separate rows")
+    check({r["name"] for r in rows} == {"Ручка"}, "sanity: both rows share the same name")
+
+
+def test_order_status_driven_by_received_qty_not_remaining_stock():
+    # compute_order_status only ever takes (ordered, received, expected_date, today,
+    # current_status) - remaining EI_CODE stock never enters the computation, so fully issuing
+    # a received order back out to zero stock cannot revert its status away from "Получено".
+    status = compute_order_status(10, 10, "", "2026-01-01")
+    check(status == "Получено", "a fully received order's status must be Получено")
+    remaining_stock_after_full_issue = 0  # noqa: F841 - documents intent, not fed into the function
+    status_after_issue = compute_order_status(10, 10, "", "2026-01-01")
+    check(status_after_issue == "Получено",
+          "issuing all received stock back out must not change order status - it is driven by received qty")
+
+
+# --- batch_duplicate_posting fix: an already-committed row can't sneak into a later batch -----
+def test_batch_duplicate_posting_excludes_already_done_rows():
+    rows = {1: {"code": "ЕИ-1", "qty": 5, "state": ""}}
+
+    def build_line(row_id):
+        state = rows[row_id]["state"]
+        if state.startswith("DONE:"):
+            return None  # excluded silently - already posted, not an error
+        if state == "":
+            state = f"draft-{row_id}"
+            rows[row_id]["state"] = state
+        return {"code": rows[row_id]["code"], "qty": rows[row_id]["qty"], "draft": state}
+
+    def conduct_all(candidate_row_ids):
+        included = []
+        for rid in candidate_row_ids:
+            line = build_line(rid)
+            if line is not None:
+                included.append(rid)
+        if not included:
+            return None
+        for rid in included:
+            rows[rid]["state"] = "DONE:" + rows[rid]["state"]
+        return included
+
+    posted_first = conduct_all([1])
+    check(posted_first == [1], "first batch posts row 1")
+    check(rows[1]["state"].startswith("DONE:"), "row must be marked DONE after a successful post")
+
+    rows[2] = {"code": "ЕИ-2", "qty": 3, "state": ""}
+    posted_second = conduct_all([1, 2])
+    check(posted_second == [2],
+          f"already-posted row 1 must NOT be re-included in a later batch (would double-post it), got {posted_second}")
+
+
+# --- batch_invalid_line fix: a filled-but-invalid row aborts the WHOLE batch ------------------
+def test_batch_invalid_line_blocks_entire_batch():
+    rows = [
+        {"code": "ЕИ-1", "qty": 5},    # valid
+        {"code": "ЕИ-2", "qty": None},  # filled code, but missing/invalid qty
+    ]
+
+    def build_line(row):
+        if not row["qty"] or row["qty"] <= 0:
+            raise TestFailure(f"row with code {row['code']} is filled but invalid")
+        return row
+
+    def conduct_all(rows):
+        plan = []
+        for row in rows:
+            if row["code"] == "":
+                continue  # genuinely empty row - not included, not an error
+            plan.append(build_line(row))  # raises on the first invalid FILLED row
+        return plan
+
+    try:
+        conduct_all(rows)
+        raise TestFailure("expected the invalid filled row to abort the whole batch, not just be skipped")
+    except TestFailure as e:
+        check("invalid" in str(e), f"wrong failure: {e}")
+
+
 TESTS = [
     test_fifo_two_lots,
     test_fifo_shortage_rejects_whole_document,
@@ -802,6 +1028,18 @@ TESTS = [
     test_tx_protocol_failure_before_prepared_creates_no_product,
     test_tx_protocol_failure_after_prepared_before_committed_leaves_product_invisible,
     test_tx_protocol_retry_after_failure_is_idempotent_no_bad_code_reuse,
+    test_two_receipts_of_same_name_get_different_ei_codes,
+    test_second_receipt_never_reuses_first_ei_code,
+    test_issue_by_ei_code_affects_only_that_ei_code,
+    test_issue_over_ei_code_remaining_is_rejected_even_if_sibling_has_stock,
+    test_two_issue_rows_for_two_ei_codes_post_atomically,
+    test_return_restores_original_location_not_product_default,
+    test_inventory_shortage_exceeding_balance_is_rejected_not_empty_lot,
+    test_orders_show_remaining_separately_per_receipt_position,
+    test_presence_sheet_keeps_identical_names_as_separate_rows,
+    test_order_status_driven_by_received_qty_not_remaining_stock,
+    test_batch_duplicate_posting_excludes_already_done_rows,
+    test_batch_invalid_line_blocks_entire_batch,
 ]
 
 

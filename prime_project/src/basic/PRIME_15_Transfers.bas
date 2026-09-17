@@ -107,6 +107,7 @@ End Sub
 ' R09: несколько отмеченных строк перемещения проводятся ОДНИМ документом; R10: несколько строк
 ' одного товара с одного и того же (места, контура) резервируют остаток друг у друга (см.
 ' PRIME_04_Posting.PRIME_ValidateTransfer).
+' batch_invalid_line fix (2.1.1): см. идентичный комментарий у PRIME_Issues_ConductAllButton.
 Public Sub PRIME_Transfers_ConductAllButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_TRANSFERS)
@@ -114,6 +115,8 @@ Public Sub PRIME_Transfers_ConductAllButton()
     headers = PRIME_HeaderMap(SH_TRANSFERS)
     Dim colCode As Long
     colCode = PRIME_ColIndex(headers, "Внутренний код")
+    Dim colState As Long
+    colState = PRIME_ColIndex(headers, "_PRIME_TransferState")
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
 
@@ -125,9 +128,13 @@ Public Sub PRIME_Transfers_ConductAllButton()
     Dim r As Long
     For r = 1 To lastRow
         If Trim(oSheet.getCellByPosition(colCode, r).getString()) <> "" Then
-            Dim docLine As PrimeDocLine
-            Dim rowKey As String
-            If PRIME_Transfers_BuildLine(oSheet, headers, r, docLine, rowKey) Then
+            If colState < 0 Or Left(oSheet.getCellByPosition(colState, r).getString(), 5) <> "DONE:" Then
+                Dim docLine As PrimeDocLine
+                Dim rowKey As String
+                If Not PRIME_Transfers_BuildLine(oSheet, headers, r, docLine, rowKey) Then
+                    MsgBox "Проведение не выполнено: строка " & (r + 1) & " заполнена, но невалидна. Исправьте её или очистите перед проведением всего батча."
+                    Exit Sub
+                End If
                 If plan.LineCount = 0 Then PRIME_InitPlan(plan, DOC_TRANSFER, SH_TRANSFERS, "")
                 batchKey = batchKey & rowKey & ","
                 rowForLine(plan.LineCount) = r
@@ -144,6 +151,13 @@ Public Sub PRIME_Transfers_ConductAllButton()
     If docId = "" Then
         MsgBox "Проведение не выполнено: " & PRIME_LastPostError()
         Exit Sub
+    End If
+    If colState >= 0 Then
+        Dim i As Long
+        For i = 0 To plan.LineCount - 1
+            oSheet.getCellByPosition(colState, rowForLine(i)).setString("DONE:" & _
+                oSheet.getCellByPosition(colState, rowForLine(i)).getString())
+        Next i
     End If
     MsgBox "Проведено перемещений: " & plan.LineCount & " (документ " & docId & ")"
 End Sub
@@ -166,14 +180,24 @@ Public Sub PRIME_Transfers_ConductRow(ByVal oSheet As Object, ByVal row As Long)
         MsgBox "Проведение не выполнено: " & PRIME_LastPostError()
         Exit Sub
     End If
+    Dim colState As Long
+    colState = PRIME_ColIndex(headers, "_PRIME_TransferState")
+    If colState >= 0 Then
+        oSheet.getCellByPosition(colState, row).setString("DONE:" & oSheet.getCellByPosition(colState, row).getString())
+    End If
     MsgBox "Перемещение проведено: " & docId
 End Sub
 
+' batch_duplicate_posting fix (2.1.1): см. идентичный комментарий у PRIME_06_Issues.PRIME_Issues_BuildLine.
 Private Function PRIME_Transfers_BuildLine(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, _
         ByRef docLine As PrimeDocLine, ByRef draftId As String) As Boolean
     Dim colState As Long
     colState = PRIME_ColIndex(headers, "_PRIME_TransferState")
     If colState >= 0 Then draftId = oSheet.getCellByPosition(colState, row).getString()
+    If Left(draftId, 5) = "DONE:" Then
+        PRIME_Transfers_BuildLine = False
+        Exit Function
+    End If
     If draftId = "" Then
         draftId = "TRF-" & Format(PRIME_SequenceNext("TRANSFER_DRAFT_ID"), "00000000")
         If colState >= 0 Then oSheet.getCellByPosition(colState, row).setString(draftId)

@@ -196,6 +196,13 @@ Public Sub PRIME_Returns_ConductButton()
     For r = PRIME_FormSchemaFirstDataRow(SH_RETURNS) To lastRow
         Dim qtyStr As String
         qtyStr = Trim(oSheet.getCellByPosition(colReturnNow, r).getString())
+        ' batch_invalid_line fix (2.1.1): раньше заполненное, но невалидное (нечисловое/<=0)
+        ' "Вернуть сейчас" молча (без единого сообщения) исключалось из батча - теперь
+        ' останавливает построение всего батча целиком.
+        If qtyStr <> "" And (Not IsNumeric(qtyStr) Or CDbl(qtyStr) <= 0) Then
+            MsgBox "Проведение не выполнено: строка " & (r + 1) & " ""Вернуть сейчас"" заполнена, но невалидна. Исправьте её или очистите перед проведением всего батча."
+            Exit Sub
+        End If
         If qtyStr <> "" And IsNumeric(qtyStr) And CDbl(qtyStr) > 0 Then
             Dim state As String
             state = oSheet.getCellByPosition(colState, r).getString()

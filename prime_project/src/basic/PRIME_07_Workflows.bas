@@ -169,6 +169,9 @@ End Sub
 
 ' R09 (2.1.0): все строки с заполненным кодом проводятся ОДНИМ документом (один DOC_ID/OP_ID/
 ' один store()) вместо цикла отдельных PostDocument-вызовов на каждую строку.
+' batch_invalid_line fix (2.1.1): см. идентичный комментарий у PRIME_Issues_ConductAllButton -
+' заполненная, но невалидная строка теперь останавливает построение всего батча, а не молча
+' исключается из него.
 Public Sub PRIME_Workflow_ConductAllButton()
     Dim oSheet As Object
     oSheet = ThisComponent.CurrentController.ActiveSheet
@@ -178,6 +181,8 @@ Public Sub PRIME_Workflow_ConductAllButton()
     headers = PRIME_HeaderMap(sheetName)
     Dim colCode As Long
     colCode = PRIME_ColIndex(headers, "Внутренний код")
+    Dim colState As Long
+    colState = PRIME_ColIndex(headers, "_PRIME_WFState")
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
 
@@ -189,9 +194,13 @@ Public Sub PRIME_Workflow_ConductAllButton()
     Dim r As Long
     For r = PRIME_FormSchemaFirstDataRow(sheetName) To lastRow
         If Trim(oSheet.getCellByPosition(colCode, r).getString()) <> "" Then
-            Dim docLine As PrimeDocLine
-            Dim rowKey As String
-            If PRIME_Workflow_BuildLine(oSheet, sheetName, headers, r, docLine, rowKey) Then
+            If colState < 0 Or Left(oSheet.getCellByPosition(colState, r).getString(), 5) <> "DONE:" Then
+                Dim docLine As PrimeDocLine
+                Dim rowKey As String
+                If Not PRIME_Workflow_BuildLine(oSheet, sheetName, headers, r, docLine, rowKey) Then
+                    MsgBox "Проведение не выполнено: строка " & (r + 1) & " заполнена, но невалидна. Исправьте её или очистите перед проведением всего батча."
+                    Exit Sub
+                End If
                 If plan.LineCount = 0 Then
                     PRIME_InitPlan(plan, IIf(PRIME_Workflow_IsReceiptSheet(sheetName), DOC_RECEIPT, DOC_ISSUE), sheetName, "")
                 End If
@@ -215,6 +224,10 @@ Public Sub PRIME_Workflow_ConductAllButton()
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, rowForLine(i))
+        If colState >= 0 Then
+            oSheet.getCellByPosition(colState, rowForLine(i)).setString("DONE:" & _
+                oSheet.getCellByPosition(colState, rowForLine(i)).getString())
+        End If
     Next i
     MsgBox "Проведено строк: " & plan.LineCount & " (документ " & docId & ")"
 End Sub
@@ -241,11 +254,19 @@ Public Sub PRIME_Workflow_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     End If
 
     PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, row)
+    Dim colState As Long
+    colState = PRIME_ColIndex(headers, "_PRIME_WFState")
+    If colState >= 0 Then
+        oSheet.getCellByPosition(colState, row).setString("DONE:" & oSheet.getCellByPosition(colState, row).getString())
+    End If
     MsgBox "Проведено: " & docId
 End Sub
 
 ' Читает строку Приход/Расход-Цех/Офис и строит PrimeDocLine - общий для одиночного и
 ' батч-проведения. Контур определяется листом (PRIME_ContourForSheet), не вводится пользователем.
+' batch_duplicate_posting fix (2.1.1): см. идентичный комментарий у PRIME_06_Issues.
+' PRIME_Issues_BuildLine - тот же паттерн "успешно проведённая строка никогда не помечалась и
+' навсегда оставалась включаемой в следующий батч" был и здесь, на всех 4 workflow-листах.
 Private Function PRIME_Workflow_BuildLine(ByVal oSheet As Object, ByVal sheetName As String, ByVal headers As Variant, ByVal row As Long, _
         ByRef docLine As PrimeDocLine, ByRef draftId As String) As Boolean
     Dim isReceipt As Boolean
@@ -254,6 +275,10 @@ Private Function PRIME_Workflow_BuildLine(ByVal oSheet As Object, ByVal sheetNam
     Dim colState As Long
     colState = PRIME_ColIndex(headers, "_PRIME_WFState")
     If colState >= 0 Then draftId = oSheet.getCellByPosition(colState, row).getString()
+    If Left(draftId, 5) = "DONE:" Then
+        PRIME_Workflow_BuildLine = False
+        Exit Function
+    End If
     If draftId = "" Then
         draftId = "WF-" & Format(PRIME_SequenceNext("WF_DRAFT_ID"), "00000000")
         If colState >= 0 Then oSheet.getCellByPosition(colState, row).setString(draftId)

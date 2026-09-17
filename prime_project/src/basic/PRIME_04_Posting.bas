@@ -211,15 +211,24 @@ Private Function PRIME_ValidateAndExpandPlan(ByRef plan As PrimeDocPlan, ByRef e
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        ' Идентичность товара: если код не указан, создаём новый ТОЛЬКО когда явно есть название
-        ' (используется формами, где допустим ввод нового товара с нуля).
-        If plan.Lines(i).ProductCode = "" Then
+        ' unique_ei_per_receipt (2.1.1): приход ВСЕГДА создаёт новую складскую позицию (ЕИ-код) -
+        ' даже если "Код товара" был предзаполнен (например, кнопкой "Распознать по артикулам")
+        ' для удобного автозаполнения наименования/категории. Этот код НЕ используется как
+        ' идентичность физического остатка на приходе (см. PRIME_ValidateReceipt) - единственное
+        ' реальное требование для строки прихода - наименование (само оно уже подставлено
+        ' автозаполнением, если код был указан). Для остальных типов документа (Issue/Return/
+        ' Transfer/Adjustment) код обязателен и должен ссылаться на существующую позицию.
+        If plan.DocType = DOC_RECEIPT Then
             If plan.Lines(i).ProductName = "" Then
-                errMsg = "Строка " & (i + 1) & ": не указан ни код товара, ни наименование."
+                errMsg = "Строка " & (i + 1) & ": не указано наименование товара."
                 PRIME_ValidateAndExpandPlan = False
                 Exit Function
             End If
-        ElseIf Not PRIME_ProductExists(plan.Lines(i).ProductCode) And plan.DocType <> DOC_RECEIPT Then
+        ElseIf plan.Lines(i).ProductCode = "" Then
+            errMsg = "Строка " & (i + 1) & ": не указан код товара (ЕИ-код)."
+            PRIME_ValidateAndExpandPlan = False
+            Exit Function
+        ElseIf Not PRIME_ProductExists(plan.Lines(i).ProductCode) Then
             errMsg = "Строка " & (i + 1) & ": товар с кодом " & plan.Lines(i).ProductCode & " не найден."
             PRIME_ValidateAndExpandPlan = False
             Exit Function
@@ -255,6 +264,13 @@ Private Function PRIME_ValidateAndExpandPlan(ByRef plan As PrimeDocPlan, ByRef e
 End Function
 
 ' Разница инвентаризации: знак сохраняется через конвертацию (недостача - отрицательная QtyBase).
+' no_empty_lot_fallback (2.1.1): недостача обязана списываться с конкретной реальной партии
+' (EI_CODE) - если найденных по (товар, место, контур) партий не хватает на всю недостачу
+' (снимок инвентаризации устарел - движения появились уже после него), весь batch отклоняется
+' ЗДЕСЬ, на этапе валидации с нулевой записью, а не молча пишется движение с пустым LOT_ID на
+' этапе PRIME_PostAdjustmentLines (см. её комментарий - там это теперь Err.Raise, а не тихий
+' fallback). PRIME_HasMovementsSince уже отдельно ловит часть таких случаев как "конфликт" до
+' построения плана, эта проверка - вторая, финальная линия защиты прямо перед записью.
 Private Function PRIME_ValidateAdjustment(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
     Dim i As Long
     For i = 0 To plan.LineCount - 1
@@ -268,45 +284,51 @@ Private Function PRIME_ValidateAdjustment(ByRef plan As PrimeDocPlan, ByRef errM
             Exit Function
         End If
         plan.Lines(i).QtyBase = CDbl(baseQty) * sign
+
+        If plan.Lines(i).QtyBase < 0 Then
+            Dim available As Double
+            available = PRIME_LocationContourBalance(plan.Lines(i).ProductCode, plan.Lines(i).LocationTo, plan.Lines(i).Contour)
+            If available < -plan.Lines(i).QtyBase - 0.0000005 Then
+                errMsg = "Строка " & (i + 1) & ": недостача " & (-plan.Lines(i).QtyBase) & " по " & plan.Lines(i).ProductCode & _
+                    " превышает фактически доступный остаток этой позиции (" & available & "). Обновите остатки и повторите инвентаризацию."
+                PRIME_ValidateAdjustment = False
+                Exit Function
+            End If
+        End If
     Next i
     PRIME_ValidateAdjustment = True
 End Function
 
-' transaction_protocol: для нового товара (ProductCode="") НЕ вызываем PRIME_CreateProduct
-' здесь - валидация обязана быть чистой (ноль записей в DB_PRIME_*). Но БУДУЩИЙ ЕИ-код нужен
-' прямо сейчас, чтобы попасть в план (шаг "построить план в памяти, включая новые товары и
-' зарезервированные ЕИ-коды") - поэтому он ТОЛЬКО ПОДГЛЯДЫВАЕТСЯ через read-only
+' unique_ei_per_receipt (2.1.1): КАЖДАЯ строка прихода - это отдельная, независимая складская
+' позиция (ЕИ-код) со своим собственным остатком, даже если это буквально тот же товар, тот же
+' артикул и тот же поставщик, что и в предыдущем приходе. Одинаковое наименование НИКОГДА
+' автоматически не суммируется в одну позицию (см. docs/REQUIREMENTS_MATRIX.md R32) - поэтому,
+' в отличие от 2.1.0, здесь больше нет ветки "код указан -> считать существующим товаром": ЛЮБАЯ
+' строка прихода получает НОВЫЙ код, а любой предзаполненный ProductCode (например, через
+' "Распознать по артикулам") используется только для того, чтобы автозаполнить наименование до
+' этого места - на саму идентичность физического остатка он не влияет.
+'
+' transaction_protocol: валидация обязана быть чистой (ноль записей в DB_PRIME_*). Будущий
+' ЕИ-код нужен прямо сейчас, чтобы попасть в план (шаг "построить план в памяти, включая новые
+' товары и зарезервированные ЕИ-коды") - поэтому он ТОЛЬКО ПОДГЛЯДЫВАЕТСЯ через read-only
 ' PRIME_PeekSequenceValue (не пишет ничего), а не выдаётся через PRIME_SequenceNext/
 ' PRIME_NextProductCode (которые физически увеличивают и пишут счётчик). Весь вызов
 ' PRIME_PostDocument сериализован одним мьютексом (PRIME_TryEnter), поэтому между этим peek и
 ' фактической записью счётчика на этапе PRIME_WriteNewProductsIfAny никто другой не может
-' вклиниться и увидеть/забрать тот же код. Коэффициент пересчёта для нового товара тривиален
-' (введённая единица становится его базовой, фактор=1). Физическая запись карточки товара
-' откладывается до PRIME_WriteNewProductsIfAny - вызывается из PRIME_PostDocument ПОСЛЕ того,
-' как SYS_PRIME_TX.STATE=PREPARED уже физически записан.
+' вклиниться и увидеть/забрать тот же код. Коэффициент пересчёта тривиален (введённая единица
+' становится базовой единицей ЭТОЙ позиции, фактор=1 - другого выбора и не может быть, раз
+' позиция физически создаётся впервые). Физическая запись карточки товара откладывается до
+' PRIME_WriteNewProductsIfAny - вызывается из PRIME_PostDocument ПОСЛЕ того, как
+' SYS_PRIME_TX.STATE=PREPARED уже физически записан.
 Private Function PRIME_ValidateReceipt(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
     Dim productCodeBase As Long
     productCodeBase = PRIME_PeekSequenceValue("PRODUCT_CODE")
-    Dim newProductCount As Long
-    newProductCount = 0
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        Dim baseQty As Variant
-        If plan.Lines(i).ProductCode = "" Then
-            plan.Lines(i).IsNewProduct = True
-            newProductCount = newProductCount + 1
-            plan.Lines(i).ProductCode = PRIME_FormatProductCode(productCodeBase + newProductCount)
-            baseQty = PRIME_RoundQty(plan.Lines(i).QtyInput) ' новый товар: введённая единица = базовая, фактор 1
-        Else
-            baseQty = PRIME_ConvertQtyToBase(plan.Lines(i).ProductCode, plan.Lines(i).UnitInput, plan.Lines(i).QtyInput)
-            If IsEmpty(baseQty) Then
-                errMsg = "Строка " & (i + 1) & ": нет коэффициента пересчёта для единицы """ & plan.Lines(i).UnitInput & """."
-                PRIME_ValidateReceipt = False
-                Exit Function
-            End If
-        End If
-        plan.Lines(i).QtyBase = CDbl(baseQty)
+        plan.Lines(i).IsNewProduct = True
+        plan.Lines(i).ProductCode = PRIME_FormatProductCode(productCodeBase + i + 1)
+        plan.Lines(i).QtyBase = PRIME_RoundQty(plan.Lines(i).QtyInput) ' новая позиция: введённая единица = её базовая, фактор 1
         plan.Lines(i).LotId = "LOT-" ' финальный номер присваивается на этапе записи (PRIME_PostReceiptLines)
     Next i
     PRIME_ValidateReceipt = True
@@ -343,9 +365,13 @@ Private Function PRIME_ValidateIssue(ByRef plan As PrimeDocPlan, ByRef errMsg As
         Dim remaining As Double
         remaining = available - CDbl(alreadyReservedInPlan)
         If remaining < plan.Lines(i).QtyBase - 0.0000005 Then
-            errMsg = "Строка " & (i + 1) & ": недостаточно остатка на месте """ & plan.Lines(i).LocationFrom & _
-                """ (" & PRIME_ContourDisplayName(plan.Lines(i).Contour) & "): доступно " & remaining & _
-                ", требуется " & plan.Lines(i).QtyBase & ". Документ не проведён целиком."
+            ' no_cross_ei_fifo (2.1.1): остаток проверяется строго по ЭТОМУ ЕИ-коду на этом
+            ' месте/контуре - при нехватке документ ЦЕЛИКОМ отклоняется, а не списывается
+            ' частично с другой (пусть даже одноимённой) позиции. Пользователь сам добавляет
+            ' вторую позицию отдельной строкой, если нужно списать с двух ЕИ-кодов сразу.
+            errMsg = "Строка " & (i + 1) & ": доступно по " & plan.Lines(i).ProductCode & " на месте """ & plan.Lines(i).LocationFrom & _
+                """ (" & PRIME_ContourDisplayName(plan.Lines(i).Contour) & "): " & remaining & _
+                " шт. Не хватает: " & (plan.Lines(i).QtyBase - remaining) & " шт. Добавьте другую позицию (ЕИ-код) отдельной строкой. Документ не проведён целиком."
             PRIME_ValidateIssue = False
             Exit Function
         End If
@@ -826,8 +852,15 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
                     Dim take As Double
                     take = remaining
                     If availableInAlloc < take Then take = availableInAlloc
+                    ' transaction_protocol/return_destination_fix (2.1.1): возврат обязан
+                    ' зачисляться туда, ОТКУДА реально была выдача - в конкретную партию lots(j)
+                    ' (место+контур), а НЕ в DEFAULT_LOCATION/GENERAL по умолчанию. Читаем
+                    ' фактические LOCATION/STOCK_CONTOUR исходной партии, а не line-level поля
+                    ' plan.Lines(i).LocationTo/.Contour (которые до этого фикса задавались как
+                    ' общий дефолт для ВСЕЙ строки возврата и игнорировали, откуда именно был
+                    ' списан каждый конкретный allocation).
                     moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                        lots(j), take, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
+                        lots(j), take, PRIME_GetLotField(lots(j), "LOCATION"), plan.DocDate, opId, PRIME_GetLotField(lots(j), "STOCK_CONTOUR"))
                     moveCount = moveCount + 1
                     If hasRetAlloc Then
                         If retAllocCount > UBound(retAllocRowsBuf) Then ReDim Preserve retAllocRowsBuf(UBound(retAllocRowsBuf) + 4000)
@@ -1068,16 +1101,15 @@ Private Sub PRIME_PostAdjustmentLines(ByVal docId As String, ByVal opId As Strin
                     shortage = shortage - take
                 End If
             Next j
-            ' Если найденных партий не хватило на всю недостачу (расчёт разницы устарел -
-            ' движения появились уже после снимка инвентаризации), списываем остаток без
-            ' привязки к партии - лучше провести с честной пометкой в диагностике, чем
-            ' заблокировать инвентаризацию целиком.
+            ' no_empty_lot_fallback (2.1.1): PRIME_ValidateAdjustment уже отклонила бы весь batch
+            ' до этой точки, если найденных партий не хватает на всю недостачу - см. её
+            ' комментарий. Если это условие всё же достигнуто (гонка между validation и записью
+            ' внутри ОДНОГО сериализованного PRIME_TryEnter-вызова теоретически невозможна, но
+            ' second line of defense), НЕ пишем движение с пустым LOT_ID (untraceable stock) -
+            ' поднимаем ошибку, откатывая всю транзакцию, как и любую другую внутреннюю ошибку.
             If shortage > 0.0000005 Then
-                If moveCount > UBound(moveRowsBuf) Then ReDim Preserve moveRowsBuf(UBound(moveRowsBuf) + 4000)
-                moveRowsBuf(moveCount) = PRIME_BuildMovementRow(moveHeaders, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                    "", -shortage, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour)
-                moveCount = moveCount + 1
-                PRIME_AuditLog(opId, STAGE_ERROR, plan.SourceSheet, "ADJUSTMENT_SHORTAGE_EXCEEDS_LOTS:" & plan.Lines(i).ProductCode)
+                Err.Raise 1012, "PRIME_Posting.PRIME_PostAdjustmentLines", _
+                    "Внутренняя ошибка: недостача по " & plan.Lines(i).ProductCode & " превышает найденные партии после прохождения валидации."
             End If
         End If
     Next i

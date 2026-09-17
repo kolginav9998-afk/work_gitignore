@@ -184,6 +184,12 @@ End Sub
 ' одного товара из одного места теперь резервируют остаток друг у друга внутри одного плана
 ' (см. PRIME_04_Posting.PRIME_ValidateIssue) - две строки по 6 при остатке 10 отклоняются ВЕСЬ
 ' документ, а не проходят обе независимо.
+' batch_invalid_line fix (2.1.1): раньше строка с заполненным "Код", но невалидная (например,
+' пустое "Кол-во"), просто МОЛЧА (не считая одного MsgBox) пропускалась - весь батч без неё всё
+' равно проводился, оставляя у пользователя ложное впечатление, что обработаны ВСЕ заполненные
+' строки. Теперь любая заполненная, но не прошедшая BuildLine строка (кроме уже DONE - та
+' пропускается штатно, это не ошибка) останавливает построение ВСЕГО батча целиком - ничего не
+' проводится, пока пользователь не поправит или не очистит эту строку.
 Public Sub PRIME_Issues_ConductAllButton()
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_ISSUES)
@@ -191,6 +197,8 @@ Public Sub PRIME_Issues_ConductAllButton()
     headers = PRIME_HeaderMap(SH_ISSUES)
     Dim colCode As Long
     colCode = PRIME_ColIndex(headers, "Код")
+    Dim colState As Long
+    colState = PRIME_ColIndex(headers, "_PRIME_IssueState")
     Dim lastRow As Long
     lastRow = PRIME_FindLastRow(oSheet)
 
@@ -202,9 +210,13 @@ Public Sub PRIME_Issues_ConductAllButton()
     Dim r As Long
     For r = 1 To lastRow
         If Trim(oSheet.getCellByPosition(colCode, r).getString()) <> "" Then
-            Dim docLine As PrimeDocLine
-            Dim rowKey As String
-            If PRIME_Issues_BuildLine(oSheet, headers, r, docLine, rowKey) Then
+            If Left(oSheet.getCellByPosition(colState, r).getString(), 5) <> "DONE:" Then
+                Dim docLine As PrimeDocLine
+                Dim rowKey As String
+                If Not PRIME_Issues_BuildLine(oSheet, headers, r, docLine, rowKey) Then
+                    MsgBox "Проведение не выполнено: строка " & (r + 1) & " заполнена, но невалидна. Исправьте её или очистите перед проведением всего батча."
+                    Exit Sub
+                End If
                 If plan.LineCount = 0 Then PRIME_InitPlan(plan, DOC_ISSUE, SH_ISSUES, "")
                 batchKey = batchKey & rowKey & ","
                 rowForLine(plan.LineCount) = r
@@ -226,6 +238,8 @@ Public Sub PRIME_Issues_ConductAllButton()
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         PRIME_Issues_RefreshInlineStock(oSheet, headers, rowForLine(i))
+        oSheet.getCellByPosition(colState, rowForLine(i)).setString("DONE:" & _
+            oSheet.getCellByPosition(colState, rowForLine(i)).getString())
     Next i
     MsgBox "Проведено строк выдачи: " & plan.LineCount & " (документ " & docId & ")"
 End Sub
@@ -251,15 +265,30 @@ Public Sub PRIME_Issues_ConductRow(ByVal oSheet As Object, ByVal row As Long)
     End If
 
     PRIME_Issues_RefreshInlineStock(oSheet, headers, row)
+    Dim colState As Long
+    colState = PRIME_ColIndex(headers, "_PRIME_IssueState")
+    oSheet.getCellByPosition(colState, row).setString("DONE:" & oSheet.getCellByPosition(colState, row).getString())
     MsgBox "Выдача проведена: " & docId
 End Sub
 
 ' Читает строку "Выдачи" и строит PrimeDocLine - общий для одиночного и батч-проведения.
 ' Возвращает False (с MsgBox) для неготовых строк - вызывающий обязан пропустить такую строку,
 ' а не прерывать весь батч.
+' batch_duplicate_posting fix (2.1.1): раньше _PRIME_IssueState никогда не помечался как
+' "проведено" после успешного commit - строка, уже один раз успешно выданная, оставалась
+' с непустым "Код" и стабильным draftId НАВСЕГДА, поэтому следующее "Провести все" (после
+' добавления новых строк ниже) снова подхватывало её в НОВЫЙ батч. Комбинированный SOURCE_KEY
+' такого батча ("BATCH:<старый_draftId>,<новый_draftId>,") ни разу раньше не встречался, поэтому
+' PRIME_FindCommittedBySourceKey не находил совпадение - и вся строка проводилась ПОВТОРНО,
+' списывая остаток дважды. Теперь успешно проведённая строка помечается префиксом "DONE:" и
+' здесь же исключается из дальнейшего включения в любой план.
 Private Function PRIME_Issues_BuildLine(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, _
         ByRef docLine As PrimeDocLine, ByRef draftId As String) As Boolean
     draftId = oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_IssueState"), row).getString()
+    If Left(draftId, 5) = "DONE:" Then
+        PRIME_Issues_BuildLine = False
+        Exit Function
+    End If
     If draftId = "" Then
         draftId = "ISS-" & Format(PRIME_SequenceNext("ISSUE_DRAFT_ID"), "00000000")
         oSheet.getCellByPosition(PRIME_ColIndex(headers, "_PRIME_IssueState"), row).setString(draftId)
