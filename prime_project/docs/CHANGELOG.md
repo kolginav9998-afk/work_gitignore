@@ -40,9 +40,9 @@ INLINE_STOCK.md`. Полный разбор — `docs/REQUIREMENTS_MATRIX.md` (�
   `PRIME_ValidateIssue`/`PRIME_ValidateTransfer` теперь ведут внутриплановое резервирование
   (product|location|contour) — весь документ отклоняется, если строки в сумме превышают
   реальный остаток, а не проходят по отдельности.
-- **Validation создавала товар до полной проверки плана.** `PRIME_ValidateReceipt` только
-  помечает `IsNewProduct`; фактическое создание вынесено в `PRIME_CreateNewProductsIfAny`,
-  вызывается в `PRIME_PostDocument` сразу после успешной валидации ВСЕГО плана.
+- **Validation создавала товар до полной проверки плана.** `PRIME_ValidateReceipt` больше не
+  пишет ничего физически; фактическая запись отложена и (см. "Пост-review исправление" ниже)
+  происходит строго после записи `SYS_PRIME_TX.STATE=PREPARED`, а не сразу после валидации.
 - **Критический баг, найденный этой сессией (не связан с перечисленным выше): пустая
   `SYS_PRIME_SEQ` ломала первое же действие в свежей книге.** `PRIME_ReadTable` возвращал для
   пустой таблицы "фантомную" строку из одного элемента `Empty` вместо строки правильной
@@ -67,12 +67,13 @@ INLINE_STOCK.md`. Полный разбор — `docs/REQUIREMENTS_MATRIX.md` (�
 - **Полный immutable snapshot заказа**: `DB_PRIME_ORDER_SNAPSHOT` расширен с 6 до 29 полей
   (поставщик, счёт, цена, категория и т.д.), копируется из строки "Заказы" в момент commit.
 - **"Последний приход"/"Дата последнего прихода"** на листе "Заказы".
-- **0 visible stubs**: 24 кнопки, ранее показывавшие "не реализовано", теперь скрыты
-  (`EnableVisible=False`) вместо видимого сообщения-заглушки.
+- **0 dead controls**: 24 кнопки, ранее показывавшие "не реализовано", физически удалены
+  (модель контрола + `ControlShape`) — см. "Пост-review исправление" ниже.
 - **Upgrade-safety для существующих 2.0.x файлов**: `PRIME_Migration_UpgradeHiddenSchemaTo210`
   дописывает новые колонки (STOCK_CONTOUR, OP_ID, PARENT_LOT_ID и т.д.) в конец заголовка уже
   существующих скрытых системных листов, не трогая старые колонки/данные.
-- 8 новых регрессионных тестов в `tests/model_tests.py` (итого 28/28).
+- 8 новых регрессионных тестов в `tests/model_tests.py` (итого 32/32 с учётом 4 fault-injection
+  тестов пост-review исправления ниже).
 - `tools/e2e_diagnostic_module.bas`/`tools/run_e2e_diagnostic.py` — диагностика прямого вызова
   `PRIME_PostDocument` в реальном headless LibreOffice (не входит в production `.ods`).
 
@@ -94,6 +95,44 @@ INLINE_STOCK.md`. Полный разбор — `docs/REQUIREMENTS_MATRIX.md` (�
 `PRIME_PostDocument` через внешний headless `invoke()` воспроизводимо нестабилен в этой
 конкретной песочнице (не подтверждает и не опровергает работу при реальном интерактивном
 использовании) — см. `docs/REQUIREMENTS_MATRIX.md` R29/R30.
+
+### Пост-review исправление (до merge, тот же PR) — transaction protocol + dead controls
+- **[Блокирующее] Физическая запись нового товара нарушала transaction protocol.** Ревью
+  справедливо указало: `PRIME_CreateNewProductsIfAny` вызывалась сразу после успешной валидации
+  и ДО записи `SYS_PRIME_TX.STATE=PREPARED` — физическая запись в `DB_PRIME_PRODUCTS` не имеет
+  права происходить до существования PREPARED. Исправлено:
+  - `PRIME_02_Store.PRIME_PeekSequenceValue` (read-only, ничего не пишет) и
+    `PRIME_AdvanceSequenceTo` (персистирует точное значение) — планирование ЕИ-кода отделено от
+    его физической персистенции.
+  - `PRIME_ValidateReceipt` теперь решает будущий код новой строки через `PRIME_PeekSequenceValue`
+    (ноль записей, как и требовалось).
+  - Новая `PRIME_04_Posting.PRIME_WriteNewProductsIfAny` заменяет `PRIME_CreateNewProductsIfAny`
+    и вызывается в `PRIME_PostDocument` СРАЗУ ПОСЛЕ записи `TX=PREPARED`, а не до неё.
+  - Новая колонка `OP_ID` в `DB_PRIME_PRODUCTS` (`PRIME_DbProductsColumns`, upgrade-safe через
+    `PRIME_Migration_UpgradeHiddenSchemaTo210`) + committed-only фильтр в
+    `PRIME_03_Catalog.PRIME_BuildProductIndex` — строка нового товара невидима обычному поиску
+    (`PRIME_ProductExists`/`PRIME_GetProduct`), пока её OP_ID не станет COMMITTED.
+  - 4 новых fault-injection теста в `tests/model_tests.py`, 1:1 моделирующих реальный протокол:
+    `test_tx_protocol_validation_failure_creates_no_product`,
+    `test_tx_protocol_failure_before_prepared_creates_no_product`,
+    `test_tx_protocol_failure_after_prepared_before_committed_leaves_product_invisible`,
+    `test_tx_protocol_retry_after_failure_is_idempotent_no_bad_code_reuse`.
+  - См. R31 в `docs/REQUIREMENTS_MATRIX.md`.
+- **[Пост-review усиление R26] 24 обсолетные кнопки-заглушки теперь физически удаляются, а не
+  скрываются.** `tools/build_ods.py`'s `HIDE`-сентинел раньше означал только
+  `EnableVisible=False` (контрол оставался в форме/DrawPage) — по итогам ревью это всё ещё
+  dead control. `rebind_buttons` теперь удаляет и модель контрола из `form`, и его
+  `ControlShape` с `DrawPage`. Удалён также сам мёртвый код-заглушка
+  (`PRIME_UI_NotImplementedStub`/`PRIME_Issues_ReturnRedirectStub` в `PRIME_12_UI.bas`,
+  `STUB`-константа в `build_ods.py`) — он больше никогда не вызывался ни одной кнопкой. Новые проверки в
+  `tests/static_checks.py`: `"0 surviving dead controls (removed, not merely hidden)"` и
+  `"0 surviving dead ControlShapes on DrawPage"`.
+- **Найден и исправлен ещё один недокументированный StarBasic-дефект**: переменная с именем
+  `base` детерминированно ломала последующие ОТДЕЛЬНЫЕ структурные `invoke()`-вызовы (создание
+  листов "Перемещения"/"Журнал"/"Комплекты", переименование "Остаток"→"Наличие") даже когда
+  функция с этой переменной никогда не вызывалась — само присутствие кода в скомпилированной
+  библиотеке "Standard" было достаточно. Исправлено переименованием в `seqBaseVal`. Подробности
+  бисекции — `docs/KNOWN_ISSUES.md`.
 
 ---
 

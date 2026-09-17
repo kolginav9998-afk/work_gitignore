@@ -24,6 +24,8 @@ import uno
 from com.sun.star.beans import PropertyValue
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+from build_ods import BUTTON_MAP, HIDE  # noqa: E402 - needs REPO_ROOT/tools on sys.path first
 
 EXPECTED_HIDDEN_SHEETS = [
     "SYS_PRIME_META", "SYS_PRIME_SEQ", "SYS_PRIME_TX",
@@ -255,27 +257,45 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             check("no working buttons reference WMSDB modules", wmsdb_bound == 0, f"{wmsdb_bound} buttons still call WMSDB*")
             check("buttons bound to PRIME macros", prime_bound > 0, f"count={prime_bound}")
 
-            # --- R26 (2.1.0): 0 VISIBLE stub buttons. A button bound to PRIME_UI_NotImplementedStub
-            # or the Issues return-redirect stub must be hidden (EnableVisible=False) - see
-            # tools/build_ods.py's HIDE sentinel. A button bound to PRIME_Legacy_ArchiveStub is
-            # NOT counted against this (deliberate read-only-archive behavior, not an unfinished
-            # feature - see comment in build_ods.py next to the HIDE sentinel).
-            visible_disallowed_stubs = []
-            for si in range(doc.Sheets.Count):
-                sh = doc.Sheets.getByIndex(si)
+            # --- post-review fix: obsolete controls (tools/build_ods.py's HIDE sentinel) must be
+            # PHYSICALLY ABSENT from the built document - not merely present-but-invisible.
+            # "Production ODS should contain no dead user controls": a hidden control that still
+            # exists in the form/DrawPage is still a dead control. Check every (sheet, control)
+            # pair mapped to HIDE in BUTTON_MAP genuinely has no surviving control model.
+            hide_pairs = [(sheet_name, ctrl_name) for (sheet_name, ctrl_name), target in BUTTON_MAP.items()
+                          if target is HIDE]
+            check("BUTTON_MAP has HIDE-mapped controls to verify", len(hide_pairs) > 0,
+                  "expected at least one HIDE-mapped control in BUTTON_MAP")
+            surviving_dead_controls = []
+            for sheet_name, ctrl_name in hide_pairs:
+                if not doc.Sheets.hasByName(sheet_name):
+                    continue  # sheet itself is gone - control cannot survive on it either
+                sh = doc.Sheets.getByName(sheet_name)
                 forms = sh.DrawPage.Forms
                 for fi in range(forms.Count):
                     form = forms.getByIndex(fi)
-                    for ci in range(form.Count):
-                        evs = form.getScriptEvents(ci)
-                        for e in evs:
-                            if ("PRIME_UI_NotImplementedStub" in e.ScriptCode
-                                    or "PRIME_Issues_ReturnRedirectStub" in e.ScriptCode):
-                                ctrl = form.getByIndex(ci)
-                                if getattr(ctrl, "EnableVisible", True):
-                                    visible_disallowed_stubs.append(f"{sh.Name}/{ctrl.Name}")
-            check("0 visible not-implemented/redirect stub buttons", len(visible_disallowed_stubs) == 0,
-                  f"still visible: {visible_disallowed_stubs}")
+                    if form.hasByName(ctrl_name):
+                        surviving_dead_controls.append(f"{sheet_name}/{ctrl_name}")
+            check("0 surviving dead controls (removed, not merely hidden)", len(surviving_dead_controls) == 0,
+                  f"still present in the form: {surviving_dead_controls}")
+
+            # Also verify no leftover ControlShape on the DrawPage references one of these names -
+            # form.removeByName() alone could in principle leave an orphaned shape behind.
+            surviving_dead_shapes = []
+            for sheet_name, ctrl_name in hide_pairs:
+                if not doc.Sheets.hasByName(sheet_name):
+                    continue
+                sh = doc.Sheets.getByName(sheet_name)
+                draw_page = sh.DrawPage
+                for shape_idx in range(draw_page.Count):
+                    shape = draw_page.getByIndex(shape_idx)
+                    try:
+                        if shape.Control.Name == ctrl_name:
+                            surviving_dead_shapes.append(f"{sheet_name}/{ctrl_name}")
+                    except Exception:
+                        continue
+            check("0 surviving dead ControlShapes on DrawPage", len(surviving_dead_shapes) == 0,
+                  f"still present on DrawPage: {surviving_dead_shapes}")
 
             # --- normal runtime has no required ODB dependency: WMS_DATA_PORTABLE.odb not embedded/opened ---
             meta_sheet_exists = doc.Sheets.hasByName("SYS_PRIME_META")

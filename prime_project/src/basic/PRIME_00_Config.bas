@@ -249,6 +249,7 @@ Public Const STAGE_VALIDATION_START As String = "VALIDATION_START"
 Public Const STAGE_VALIDATION_OK As String = "VALIDATION_OK"
 Public Const STAGE_PLAN_READY As String = "PLAN_READY"
 Public Const STAGE_TX_PREPARED As String = "TX_PREPARED"
+Public Const STAGE_PRODUCTS_WRITTEN As String = "PRODUCTS_WRITTEN"
 Public Const STAGE_DOCS_WRITTEN As String = "DOCS_WRITTEN"
 Public Const STAGE_LINES_WRITTEN As String = "LINES_WRITTEN"
 Public Const STAGE_LOTS_WRITTEN As String = "LOTS_WRITTEN"
@@ -421,8 +422,11 @@ Public Function PRIME_SysTxColumns() As Variant
 End Function
 
 Public Function PRIME_DbProductsColumns() As Variant
+    ' OP_ID: пусто = видим всегда (миграция/легаси/прямое создание); непусто = видим только когда
+    ' PRIME_IsOpIdCommitted(OP_ID)=True (транзакционное создание нового товара внутри проведения,
+    ' см. PRIME_04_Posting.PRIME_WriteNewProductsIfAny и PRIME_03_Catalog.PRIME_BuildProductIndex).
     PRIME_DbProductsColumns = Array("PRODUCT_CODE", "PRODUCT_NAME", "BASE_UNIT", "DEFAULT_LOCATION", _
-        "CATEGORY", "SUBCATEGORY", "RETURNABLE", "ACCOUNT_TYPE", "ACTIVE", "CREATED_AT", "UPDATED_AT")
+        "CATEGORY", "SUBCATEGORY", "RETURNABLE", "ACCOUNT_TYPE", "ACTIVE", "CREATED_AT", "UPDATED_AT", "OP_ID")
 End Function
 
 Public Function PRIME_DbAliasesColumns() As Variant

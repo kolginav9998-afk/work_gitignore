@@ -74,6 +74,10 @@ Public Sub PRIME_Migration_UpgradeHiddenSchemaTo210()
     PRIME_Migration_AppendHiddenSchemaColumns SH_DB_LOTS, PRIME_DbLotsColumns()
     PRIME_Migration_AppendHiddenSchemaColumns SH_DB_RETURNS, PRIME_DbReturnsColumns()
     PRIME_Migration_AppendHiddenSchemaColumns SH_DB_ORDER_SNAPSHOT, PRIME_DbOrderSnapshotColumns()
+    ' transaction_protocol (2.1.0): существующий DB_PRIME_PRODUCTS с 2.0.x не имеет OP_ID -
+    ' дописываем колонку в конец; пустое значение в старых строках корректно читается как
+    ' "легаси/миграция, видим всегда" (см. PRIME_03_Catalog.PRIME_BuildProductIndex).
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_PRODUCTS, PRIME_DbProductsColumns()
 End Sub
 
 Public Sub PRIME_Install_EnsureSchema()

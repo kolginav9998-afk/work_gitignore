@@ -63,14 +63,31 @@ def main():
 {model_counts}
 ```
 
+## POST-REVIEW FIX (this build): transaction protocol + dead control removal
+
+- **Transaction protocol.** Физическая запись нового товара в `DB_PRIME_PRODUCTS` теперь
+  происходит строго ПОСЛЕ записи `SYS_PRIME_TX.STATE=PREPARED` (было — до неё, блокирующее
+  замечание ревью). 4 новых fault-injection теста в `tests/model_tests.py` (входят в счёт ниже)
+  проверяют: отказ валидации не создаёт товар; отказ до PREPARED не создаёт товар; отказ после
+  PREPARED, но до COMMITTED, оставляет строку физически существующей, но невидимой обычному
+  поиску товара; повторная попытка после отказа идемпотентна и не создаёт дублирующийся активный
+  код. Подробности — `docs/REQUIREMENTS_MATRIX.md` R31, `docs/CHANGELOG.md`.
+- **0 dead controls (усиление R26).** 24 обсолетные кнопки теперь физически удаляются
+  (модель контрола + `ControlShape`), а не просто скрываются `EnableVisible=False`. Проверено
+  `tests/static_checks.py` ("0 surviving dead controls"/"0 surviving dead ControlShapes") и
+  логом сборки ("removed 24 dead controls (of 24 mapped for removal)").
+
 ## NOT EXECUTED / REQUIRES MANUAL TEST
 
 - Полный интерактивный сценарий из мастер-задания (создание товара/заказа, приход, выдача,
   FIFO, возврат, перемещение, инвентаризация, поиск, журнал, акт, сохранение/переоткрытие) не
   выполнялся как единый живой сеанс - см. `docs/TEST_MATRIX.md` (Слой 5) для объяснения, почему
   автоматизация этого сценария в headless LibreOffice в этом окружении признана ненадёжной.
+  Пошаговый чек-лист для ручного прохождения этого сценария на целевой машине —
+  `docs/MANUAL_ACCEPTANCE.md`.
 - Load-тесты на 1000/10000 движений (`tests/fixtures/`) не запускались против собранного `.ods`.
-- Ручная проверка в интерактивном (не headless) LibreOffice не проводилась.
+- Ручная проверка в интерактивном (не headless) LibreOffice не проводилась (см.
+  `docs/MANUAL_ACCEPTANCE.md`).
 
 ## KNOWN LIMITATIONS
 
@@ -81,9 +98,11 @@ def main():
 Подтверждено рантайм-исполнением: сборка, структура собранного `.ods`, устойчивость к
 open/store/close/reopen. Подтверждено на уровне чистой Python-модели алгоритма: FIFO,
 идемпотентность, лимит возврата, сохранение остатка при перемещении, логика комплектов,
-операционный лок, event guard, committed-only остаток, согласованность SOURCE_KEY-кэша.
-НЕ подтверждено: поведение кнопок/событий проведения в реально открытом интерактивном
-документе.
+операционный лок, event guard, committed-only остаток, согласованность SOURCE_KEY-кэша,
+transaction protocol нового товара (PREPARED до физической записи, committed-only видимость,
+идемпотентный retry без коллизии кода — 4 fault-injection теста). НЕ подтверждено: поведение
+кнопок/событий проведения в реально открытом интерактивном документе — см.
+`docs/MANUAL_ACCEPTANCE.md`.
 """
     args.output.write_text(report, encoding="utf-8")
     print(f"Wrote {args.output}")

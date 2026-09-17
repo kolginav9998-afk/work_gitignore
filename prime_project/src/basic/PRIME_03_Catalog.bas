@@ -21,11 +21,23 @@ Public Sub PRIME_BuildProductIndex()
         headers = PRIME_HeaderMap(SH_DB_PRODUCTS)
         Dim colCode As Long
         colCode = PRIME_ColIndex(headers, "PRODUCT_CODE")
+        Dim colOpId As Long
+        colOpId = PRIME_ColIndex(headers, "OP_ID")
         Dim i As Long
         For i = 1 To UBound(table)
             Dim code As String
             code = CStr(table(i)(colCode))
-            If code <> "" And Not PRIME_CollectionHasKey(gProductIndex, code) Then
+            Dim visible As Boolean
+            visible = True
+            If colOpId >= 0 Then
+                Dim opId As String
+                opId = CStr(table(i)(colOpId))
+                ' Пусто = легаси/миграция/прямое создание - видим всегда. Непусто = товар создан
+                ' внутри проведения документа - видим, только если его OP_ID уже COMMITTED (иначе
+                ' это "призрачный" товар из ещё не завершённой или упавшей транзакции).
+                If opId <> "" Then visible = PRIME_IsOpIdCommitted(opId)
+            End If
+            If code <> "" And visible And Not PRIME_CollectionHasKey(gProductIndex, code) Then
                 gProductIndex.Add(table(i), code)
             End If
         Next i

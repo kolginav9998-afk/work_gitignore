@@ -110,8 +110,11 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     PRIME_AuditLog("", STAGE_VALIDATION_START, plan.SourceSheet, plan.SourceKey)
 
     ' 2. Проверка и построение полного плана в памяти (продукты/партии/FIFO/конвертации).
-    ' R11: эта функция и всё, что она вызывает, НЕ ИМЕЮТ ПРАВА писать в DB_PRIME_* - включая
-    ' создание нового товара (см. PRIME_ValidateReceipt - только помечает IsNewProduct).
+    ' transaction_protocol: эта функция и всё, что она вызывает, НЕ ИМЕЮТ ПРАВА писать в
+    ' DB_PRIME_* - включая создание нового товара. Для новой строки (IsNewProduct=True)
+    ' допускается только READ-ONLY "подглядывание" будущего ЕИ-кода через
+    ' PRIME_PeekSequenceValue (см. PRIME_ValidateReceipt) - код УЖЕ решён и попадает в план,
+    ' но счётчик SYS_PRIME_SEQ и сама строка DB_PRIME_PRODUCTS физически ещё НЕ существуют.
     Dim errMsg As String
     If Not PRIME_ValidateAndExpandPlan(plan, errMsg) Then
         gLastPostError = errMsg
@@ -122,23 +125,22 @@ Public Function PRIME_PostDocument(ByRef plan As PrimeDocPlan) As String
     End If
     PRIME_AuditLog("", STAGE_VALIDATION_OK, plan.SourceSheet, plan.SourceKey)
 
-    ' 2b. Реальное создание любых новых товаров (IsNewProduct=True) - ТОЛЬКО теперь, когда ВЕСЬ
-    ' план подтверждён валидным (R11), и ТОЛЬКО ЗДЕСЬ, а не глубже внутри PRIME_PostReceiptLines -
-    ' эмпирически подтверждено прямым вызовом функции (см. историю сессии): чем длиннее цепочка
-    ' ПОСЛЕДОВАТЕЛЬНЫХ структурных операций записи листа (insertNewByName/AppendRowsBatch) внутри
-    ' ОДНОГО вызова, тем выше эмпирический риск, что очередная такая операция в этой же цепочке
-    ' молча не выполнится (тот же класс ранее задокументированных проблем StarBasic/UNO
-    ' external-invoke, что и "EnsureSchema сразу за EnsureBusinessSheet в одном вызове"). Вызов
-    ' PRIME_CreateProduct сразу после валидации, ДО записи TX/Document/Lines, держит его
-    ' максимально РАНО в цепочке - там, где это эмпирически надёжно работало и в 2.0.1.
-    PRIME_CreateNewProductsIfAny(plan)
-
-    ' 3. OP_ID / DOC_ID, запись PREPARED.
+    ' 3. OP_ID / DOC_ID, запись PREPARED. ДО этой точки ни одна физическая запись в DB_PRIME_*
+    ' не допускается ни при каких обстоятельствах (transaction_protocol) - PREPARED должен
+    ' существовать раньше любой строки, которую он потенциально описывает.
     opId = PRIME_NewOpId()
     docId = "DOC-" & Format(PRIME_SequenceNext("DOC_ID"), "00000000")
     PRIME_WriteTxRow(opId, plan.SourceKey, docId, TX_PREPARED, "")
     txWritten = True
     PRIME_AuditLog(opId, STAGE_TX_PREPARED, plan.SourceSheet, docId)
+
+    ' 3b. Теперь, когда PREPARED уже физически записан, можно писать спланированные новые
+    ' товары (IsNewProduct=True, код уже решён на шаге 2 через PRIME_PeekSequenceValue). Каждая
+    ' такая строка получает OP_ID=opId и остаётся невидимой обычному поиску товара
+    ' (PRIME_BuildProductIndex/PRIME_ProductExists/PRIME_GetProduct), пока opId не станет
+    ' COMMITTED - см. PRIME_03_Catalog.PRIME_BuildProductIndex.
+    PRIME_WriteNewProductsIfAny plan, opId
+    PRIME_AuditLog(opId, STAGE_PRODUCTS_WRITTEN, plan.SourceSheet, docId)
 
     ' 4. Пакетная запись документа/строк/партий/движений - по типу документа.
     PRIME_WriteDocumentHeader(docId, opId, plan)
@@ -270,17 +272,31 @@ Private Function PRIME_ValidateAdjustment(ByRef plan As PrimeDocPlan, ByRef errM
     PRIME_ValidateAdjustment = True
 End Function
 
-' R11 (2.1.0): для нового товара (ProductCode="") НЕ вызываем PRIME_CreateProduct здесь -
-' валидация обязана быть чистой (без записи в DB_PRIME_*). Коэффициент пересчёта для нового
-' товара тривиален (введённая единица становится его базовой, фактор=1) - его можно посчитать
-' без существующей строки товара. Фактическое создание карточки товара откладывается до
-' PRIME_PostReceiptLines (после того, как весь план целиком подтверждён валидным).
+' transaction_protocol: для нового товара (ProductCode="") НЕ вызываем PRIME_CreateProduct
+' здесь - валидация обязана быть чистой (ноль записей в DB_PRIME_*). Но БУДУЩИЙ ЕИ-код нужен
+' прямо сейчас, чтобы попасть в план (шаг "построить план в памяти, включая новые товары и
+' зарезервированные ЕИ-коды") - поэтому он ТОЛЬКО ПОДГЛЯДЫВАЕТСЯ через read-only
+' PRIME_PeekSequenceValue (не пишет ничего), а не выдаётся через PRIME_SequenceNext/
+' PRIME_NextProductCode (которые физически увеличивают и пишут счётчик). Весь вызов
+' PRIME_PostDocument сериализован одним мьютексом (PRIME_TryEnter), поэтому между этим peek и
+' фактической записью счётчика на этапе PRIME_WriteNewProductsIfAny никто другой не может
+' вклиниться и увидеть/забрать тот же код. Коэффициент пересчёта для нового товара тривиален
+' (введённая единица становится его базовой, фактор=1). Физическая запись карточки товара
+' откладывается до PRIME_WriteNewProductsIfAny - вызывается из PRIME_PostDocument ПОСЛЕ того,
+' как SYS_PRIME_TX.STATE=PREPARED уже физически записан.
 Private Function PRIME_ValidateReceipt(ByRef plan As PrimeDocPlan, ByRef errMsg As String) As Boolean
+    Dim productCodeBase As Long
+    productCodeBase = PRIME_PeekSequenceValue("PRODUCT_CODE")
+    Dim newProductCount As Long
+    newProductCount = 0
+
     Dim i As Long
     For i = 0 To plan.LineCount - 1
         Dim baseQty As Variant
         If plan.Lines(i).ProductCode = "" Then
             plan.Lines(i).IsNewProduct = True
+            newProductCount = newProductCount + 1
+            plan.Lines(i).ProductCode = PRIME_FormatProductCode(productCodeBase + newProductCount)
             baseQty = PRIME_RoundQty(plan.Lines(i).QtyInput) ' новый товар: введённая единица = базовая, фактор 1
         Else
             baseQty = PRIME_ConvertQtyToBase(plan.Lines(i).ProductCode, plan.Lines(i).UnitInput, plan.Lines(i).QtyInput)
@@ -417,17 +433,68 @@ Private Function PRIME_ValidateTransfer(ByRef plan As PrimeDocPlan, ByRef errMsg
     PRIME_ValidateTransfer = True
 End Function
 
-' R11: единственное место, вызывающее PRIME_CreateProduct на пути проведения - только после
-' успешной PRIME_ValidateAndExpandPlan (весь план подтверждён валидным) и до любой другой
-' структурной записи (см. комментарий в PRIME_PostDocument, шаг 2b).
-Private Sub PRIME_CreateNewProductsIfAny(ByRef plan As PrimeDocPlan)
+' transaction_protocol: единственное место на пути проведения, которое физически пишет новые
+' строки в DB_PRIME_PRODUCTS - вызывается из PRIME_PostDocument ТОЛЬКО ПОСЛЕ того, как
+' SYS_PRIME_TX.STATE=PREPARED уже записан (шаг 3 в PRIME_PostDocument), НИКОГДА раньше. Код
+' каждой строки уже решён на этапе валидации (PRIME_ValidateReceipt, через read-only
+' PRIME_PeekSequenceValue) - здесь он только персистируется вместе с OP_ID текущей транзакции.
+' НЕ используем PRIME_CreateProduct (она сама вызывает PRIME_NextProductCode/PRIME_SequenceNext
+' и выдала бы ВТОРОЙ, отличный от уже запланированного, код) - пишем batch-ом напрямую и
+' фиксируем финальный сдвиг счётчика одним PRIME_AdvanceSequenceTo.
+' Пока OP_ID этой транзакции не станет COMMITTED, такая строка не резолвится обычным поиском
+' товара как активная запись каталога (см. PRIME_03_Catalog.PRIME_BuildProductIndex) - то есть
+' до COMMITTED она физически существует, но не пригодна для использования бизнес-логикой.
+Private Sub PRIME_WriteNewProductsIfAny(ByRef plan As PrimeDocPlan, ByVal opId As String)
+    Dim n As Long
+    n = 0
     Dim i As Long
     For i = 0 To plan.LineCount - 1
+        If plan.Lines(i).IsNewProduct Then n = n + 1
+    Next i
+    If n = 0 Then Exit Sub
+
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_DB_PRODUCTS)
+    Dim colOpId As Long
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
+    Dim now As String
+    now = Format(Now, "YYYY-MM-DD HH:MM:SS")
+
+    Dim rows(n - 1) As Variant
+    Dim r As Long
+    r = 0
+    For i = 0 To plan.LineCount - 1
+        ' Dim прямо на теле For (не глубже) - тот же паттерн, что уже используется в рабочем
+        ' PRIME_WriteDocLines/PRIME_WriteDocumentHeader.
+        Dim row(UBound(headers)) As Variant
         If plan.Lines(i).IsNewProduct Then
-            plan.Lines(i).ProductCode = PRIME_CreateProduct(plan.Lines(i).ProductName, plan.Lines(i).UnitInput, _
-                plan.Lines(i).LocationTo, "", "", False, "")
+            row(PRIME_ColIndex(headers, "PRODUCT_CODE")) = plan.Lines(i).ProductCode
+            row(PRIME_ColIndex(headers, "PRODUCT_NAME")) = plan.Lines(i).ProductName
+            row(PRIME_ColIndex(headers, "BASE_UNIT")) = plan.Lines(i).UnitInput
+            row(PRIME_ColIndex(headers, "DEFAULT_LOCATION")) = plan.Lines(i).LocationTo
+            row(PRIME_ColIndex(headers, "CATEGORY")) = ""
+            row(PRIME_ColIndex(headers, "SUBCATEGORY")) = ""
+            row(PRIME_ColIndex(headers, "RETURNABLE")) = 0
+            row(PRIME_ColIndex(headers, "ACCOUNT_TYPE")) = ""
+            row(PRIME_ColIndex(headers, "ACTIVE")) = 1
+            row(PRIME_ColIndex(headers, "CREATED_AT")) = now
+            row(PRIME_ColIndex(headers, "UPDATED_AT")) = now
+            If colOpId >= 0 Then row(colOpId) = opId
+            rows(r) = row
+            r = r + 1
         End If
     Next i
+    PRIME_AppendRowsBatch(SH_DB_PRODUCTS, rows)
+
+    ' Персистируем сдвиг счётчика РОВНО на n - код каждой новой строки был решён на этапе
+    ' валидации как PRIME_PeekSequenceValue()+1..+n (см. PRIME_ValidateReceipt); весь вызов
+    ' PRIME_PostDocument сериализован PRIME_TryEnter, поэтому peek здесь гарантированно вернёт
+    ' то же значение, что видела валидация этого же вызова.
+    Dim seqBaseVal As Long
+    seqBaseVal = PRIME_PeekSequenceValue("PRODUCT_CODE")
+    PRIME_AdvanceSequenceTo "PRODUCT_CODE", seqBaseVal + n
+
+    PRIME_InvalidateProductIndex()
 End Sub
 
 ' === Запись шапки/строк документа ============================================================
@@ -487,9 +554,6 @@ Private Function PRIME_LineIdFor(ByVal idx As Long) As String
 End Function
 
 ' === RECEIPT: создаёт партию на каждую строку и одно движение прихода =======================
-' R11: здесь, а не в валидации, создаётся карточка нового товара (IsNewProduct=True) - к этому
-' моменту ВЕСЬ план уже прошёл полную валидацию (PRIME_ValidateAndExpandPlan вернула True),
-' поэтому нет риска "наполовину созданного" товара из-за ошибки в ДРУГОЙ строке того же плана.
 Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, ByRef plan As PrimeDocPlan)
     Dim lotHeaders As Variant
     lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
@@ -514,10 +578,9 @@ Private Sub PRIME_PostReceiptLines(ByVal docId As String, ByVal opId As String, 
 
     Dim i As Long
     For i = 0 To plan.LineCount - 1
-        ' R11: любой IsNewProduct=True уже разрешён в PRIME_PostDocument ДО этого места (см.
-        ' PRIME_CreateNewProductsIfAny, вызывается сразу после успешной валидации, ДО TX/
-        ' Document/Lines - см. её комментарий про эмпирически найденный предел на число подряд
-        ' идущих структурных операций внутри одного invoke()) - здесь ProductCode уже заполнен.
+        ' transaction_protocol: любой IsNewProduct=True уже физически записан в DB_PRIME_PRODUCTS
+        ' в PRIME_PostDocument ДО этого места (см. PRIME_WriteNewProductsIfAny, вызывается сразу
+        ' после записи TX=PREPARED) - здесь ProductCode уже заполнен и строка товара существует.
         Dim lotId As String
         lotId = "LOT-" & Format(PRIME_SequenceNext("LOT_ID"), "00000000")
         plan.Lines(i).LotId = lotId

@@ -115,17 +115,19 @@ SHEET_EVENT_HANDLERS = {
 # сообщение "не перенесено". Аудит внешней проверки справедливо указал, что 52 такие видимые
 # кнопки-заглушки (23 NotImplementedStub + 28 ArchiveStub на легаси-листах + 1 redirect) не
 # соответствуют требованию "0 dead buttons". Реальных новых фич под них в этом проходе не
-# добавлено (см. KNOWN_ISSUES - осознанно отложенные), поэтому вместо "видимая кнопка с
-# сообщением-заглушкой" теперь HIDE: EnableVisible=False - кнопка физически присутствует в
-# документе (истории/layout не ломаем), но не отображается и не кликабельна, то есть не
-# является "видимой заглушкой" ни по букве, ни по духу требования.
+# добавлено (см. KNOWN_ISSUES - осознанно отложенные).
+# Пост-review исправление: HIDE изначально означал только EnableVisible=False - контрол
+# физически оставался в форме/DrawPage. Повторный аудит справедливо указал, что "production
+# ODS should contain no dead user controls" - невидимый, но всё ещё существующий control -
+# это тоже dead control. Теперь HIDE означает физическое удаление: и модели контрола из
+# form, и его ControlShape с DrawPage листа (см. rebind_buttons ниже) - после сборки такой
+# контрол не существует в документе вообще, а не просто скрыт.
 # ArchiveStub на 4 легаси-архивных листах (Производство/Детали) - НЕ HIDE: это не "недоделанная
 # фича", а осознанно read-only архив истории (см. ARCHITECTURE §5) - сами эти листы уже
 # скрываются целиком, если в них нет исторических данных (PRIME_UI_ApplySheetVisibility), а
 # если данные есть, кнопка-подсказка "это архив, только для чтения" - корректное, честное
 # поведение защищённого read-only листа, а не незакрытый долг.
 HIDE = None
-STUB = "Standard.PRIME_12_UI.PRIME_UI_NotImplementedStub"
 ARCHIVE_STUB = "Standard.PRIME_12_UI.PRIME_Legacy_ArchiveStub"
 
 BUTTON_MAP = {
@@ -352,7 +354,10 @@ def bind_sheet_events(doc):
 
 def rebind_buttons(doc):
     rebound = 0
-    hidden = 0
+    # (sheet, form, ctrl_name) of every HIDE-mapped control found - removed in a SEPARATE pass
+    # below, after the scan finishes. Removing a control while iterating form.getByIndex(i)/
+    # form.Count by index would shift every later index in the same form and skip controls.
+    to_remove = []
     for sheet_idx in range(doc.Sheets.Count):
         sheet = doc.Sheets.getByIndex(sheet_idx)
         forms = sheet.DrawPage.Forms
@@ -365,15 +370,7 @@ def rebind_buttons(doc):
                     continue
                 target = BUTTON_MAP[key]
                 if target is HIDE:
-                    # R26 (0 visible stubs): не реализованная в этом релизе функция скрывается,
-                    # а не оставляется видимой кнопкой с сообщением "не реализовано" - см.
-                    # комментарий у HIDE выше по файлу.
-                    try:
-                        form.revokeScriptEvent(ctrl_idx, "XActionListener", "actionPerformed", "")
-                    except Exception:
-                        pass
-                    ctrl.EnableVisible = False
-                    hidden += 1
+                    to_remove.append((sheet, form, ctrl.Name))
                     continue
                 desc = ScriptEventDescriptor()
                 desc.ListenerType = "XActionListener"
@@ -386,11 +383,47 @@ def rebind_buttons(doc):
                     pass
                 form.registerScriptEvent(ctrl_idx, desc)
                 rebound += 1
+
+    # Production ODS should contain no dead user controls: obsolete controls are physically
+    # removed (both the ControlShape on the sheet's DrawPage and the control model in the
+    # form), not merely hidden with EnableVisible=False - a hidden-but-present control is
+    # still a dead control.
+    removed = 0
+    for sheet, form, ctrl_name in to_remove:
+        draw_page = sheet.DrawPage
+        shape_found = False
+        for shape_idx in range(draw_page.Count):
+            shape = draw_page.getByIndex(shape_idx)
+            # Match by the control model's Name property, not shape identity - pyuno hands out
+            # a fresh wrapper object on each getByIndex() call, so "shape.Control is ctrl" (or
+            # even "==") is unreliable across separate lookups of what is the same UNO object.
+            try:
+                if shape.Control.Name == ctrl_name:
+                    draw_page.remove(shape)
+                    shape_found = True
+                    break
+            except Exception:
+                continue
+        try:
+            form.removeByName(ctrl_name)
+        except Exception:
+            pass
+        # Verify against the document's actual state rather than trusting a clean return -
+        # empirically, form.removeByName() can raise (likely a disposal-notification artifact
+        # of the pyuno bridge) even though the control was in fact removed; checking
+        # form.hasByName() afterwards reports what really happened, not what the call claimed.
+        if not form.hasByName(ctrl_name):
+            removed += 1
+        else:
+            print(f"  WARNING: failed to remove dead control '{sheet.Name}'!'{ctrl_name}' from its form")
+        if not shape_found:
+            print(f"  NOTE: no ControlShape found for removed control '{sheet.Name}'!'{ctrl_name}' (model removed anyway)")
+
     mapped_actions = sum(1 for v in BUTTON_MAP.values() if v is not HIDE)
     mapped_hides = sum(1 for v in BUTTON_MAP.values() if v is HIDE)
-    print(f"  rebound {rebound} buttons (of {mapped_actions} mapped actions), hid {hidden} (of {mapped_hides} mapped hides)")
-    if rebound < mapped_actions or hidden < mapped_hides:
-        print(f"  NOTE: {mapped_actions - rebound + mapped_hides - hidden} mapped (sheet, control) pairs were not found in the template")
+    print(f"  rebound {rebound} buttons (of {mapped_actions} mapped actions), removed {removed} dead controls (of {mapped_hides} mapped for removal)")
+    if rebound < mapped_actions or removed < mapped_hides:
+        print(f"  NOTE: {mapped_actions - rebound + mapped_hides - removed} mapped (sheet, control) pairs were not found in the template")
 
 
 def create_new_sheet_buttons(doc):

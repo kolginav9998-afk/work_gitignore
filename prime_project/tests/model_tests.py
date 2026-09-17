@@ -630,6 +630,145 @@ def test_multiline_batch_produces_exactly_one_document():
     check(MAX_LINES + 1 >= 1000, f"document line capacity must be at least 1000, got {MAX_LINES + 1}")
 
 
+# --- transaction_protocol fix (post-2.1.0 review): new-product write must happen strictly
+# AFTER SYS_PRIME_TX.STATE=PREPARED is physically written, never before, and must stay
+# invisible to normal product lookup until its OP_ID is COMMITTED. Model mirrors the real
+# Basic functions 1:1: PRIME_PeekSequenceValue (read-only), PRIME_AdvanceSequenceTo (persists
+# an exact value), PRIME_WriteNewProductsIfAny (writes rows + OP_ID, called after PREPARED),
+# PRIME_BuildProductIndex's OP_ID/PRIME_IsOpIdCommitted visibility filter.
+class TxProtocolModel:
+    def __init__(self):
+        self.tx_state = {}     # OP_ID -> "PREPARED" | "COMMITTED" | "FAILED"
+        self.products = []     # [{"code", "op_id", "name"}] - physical DB_PRIME_PRODUCTS rows
+        self.seq_product_code = 0  # SYS_PRIME_SEQ["PRODUCT_CODE"].NEXT_VALUE ("last issued")
+        self._op_counter = 0
+
+    def peek_sequence(self):
+        return self.seq_product_code  # PRIME_PeekSequenceValue: read-only, no side effect
+
+    def advance_sequence_to(self, value):
+        self.seq_product_code = value  # PRIME_AdvanceSequenceTo: persists an exact value
+
+    def is_op_committed(self, op_id):
+        return self.tx_state.get(op_id) == "COMMITTED"
+
+    def visible_products(self):
+        # PRIME_BuildProductIndex: OP_ID=="" (legacy/migration) always visible; otherwise only
+        # once PRIME_IsOpIdCommitted(OP_ID) is True.
+        return [p for p in self.products if p["op_id"] == "" or self.is_op_committed(p["op_id"])]
+
+    def product_exists(self, code):
+        return any(p["code"] == code for p in self.visible_products())
+
+    def post_receipt(self, new_product_names, fail_at=None):
+        """Mirrors PRIME_PostDocument's fixed order for a RECEIPT with new products:
+        1) validate (peek codes, zero writes) 2) write PREPARED 3) write new products +
+        advance sequence 4) write doc/lines/lots/movements (not modeled, irrelevant here)
+        5) COMMITTED. fail_at injects a crash at a specific point; raises TestFailure."""
+        # --- validation: zero writes, only a read-only peek to decide codes ---
+        if fail_at == "validation":
+            raise TestFailure("simulated validation failure")
+        base = self.peek_sequence()
+        codes = [f"EI-{base + i + 1:08d}" for i in range(len(new_product_names))]
+
+        if fail_at == "pre_prepared":
+            # Crash between validation and writing PREPARED: transaction_protocol requires
+            # that NOTHING physical has happened yet at this point.
+            raise TestFailure("simulated crash before PREPARED")
+
+        # --- write PREPARED (step 7) ---
+        self._op_counter += 1
+        op_id = f"OP-{self._op_counter}"
+        self.tx_state[op_id] = "PREPARED"
+
+        # --- write planned new products (step 8) - only now, AFTER PREPARED exists ---
+        for name, code in zip(new_product_names, codes):
+            self.products.append({"code": code, "op_id": op_id, "name": name})
+        self.advance_sequence_to(base + len(codes))
+
+        if fail_at == "post_prepared_pre_committed":
+            self.tx_state[op_id] = "FAILED"
+            raise TestFailure("simulated crash after PREPARED, before COMMITTED")
+
+        # --- (steps 9-11 omitted: document/lines/lots/movements/cache refresh - unrelated
+        # to product-creation ordering, already covered by other tests in this file) ---
+
+        # --- COMMITTED (step 10) ---
+        self.tx_state[op_id] = "COMMITTED"
+        return op_id, codes
+
+
+def test_tx_protocol_validation_failure_creates_no_product():
+    m = TxProtocolModel()
+    try:
+        m.post_receipt(["Widget"], fail_at="validation")
+        raise TestFailure("expected validation failure to raise")
+    except TestFailure as e:
+        check("validation" in str(e), f"wrong failure: {e}")
+    check(m.products == [], "a validation failure must create zero product rows, physically or otherwise")
+    check(m.tx_state == {}, "a validation failure must not write any SYS_PRIME_TX row")
+
+
+def test_tx_protocol_failure_before_prepared_creates_no_product():
+    m = TxProtocolModel()
+    try:
+        m.post_receipt(["Widget"], fail_at="pre_prepared")
+        raise TestFailure("expected pre-PREPARED failure to raise")
+    except TestFailure as e:
+        check("before PREPARED" in str(e), f"wrong failure: {e}")
+    check(m.products == [], "no product may be physically written before SYS_PRIME_TX.STATE=PREPARED exists")
+    check(m.tx_state == {}, "no TX row may exist either - the crash happened before it was written")
+
+
+def test_tx_protocol_failure_after_prepared_before_committed_leaves_product_invisible():
+    m = TxProtocolModel()
+    try:
+        m.post_receipt(["Widget"], fail_at="post_prepared_pre_committed")
+        raise TestFailure("expected post-PREPARED failure to raise")
+    except TestFailure as e:
+        check("before COMMITTED" in str(e), f"wrong failure: {e}")
+    # The row IS physically present (transaction_protocol allows the write once PREPARED
+    # exists) - but it must be a "ghost" row: not resolvable by normal product lookup.
+    check(len(m.products) == 1, "the product row must physically exist once PREPARED was written")
+    orphan_code = m.products[0]["code"]
+    check(m.tx_state[m.products[0]["op_id"]] == "FAILED", "the owning transaction must be FAILED, not COMMITTED")
+    check(m.product_exists(orphan_code) is False,
+          "a product whose OP_ID never reached COMMITTED must not resolve as an active catalogue entry")
+    check(m.visible_products() == [],
+          "committed-only visibility must hide every product row from a non-COMMITTED transaction")
+
+
+def test_tx_protocol_retry_after_failure_is_idempotent_no_bad_code_reuse():
+    m = TxProtocolModel()
+    # First attempt fails after PREPARED (orphans an invisible product + advances the counter).
+    try:
+        m.post_receipt(["Widget"], fail_at="post_prepared_pre_committed")
+        raise TestFailure("expected first attempt to fail")
+    except TestFailure:
+        pass
+    orphan_code = m.products[0]["code"]
+    check(m.product_exists(orphan_code) is False, "sanity: orphan must be invisible before retry")
+
+    # Retry (e.g. user re-clicks the button) with the same new-product line, this time succeeding.
+    op_id, codes = m.post_receipt(["Widget"])
+    check(len(codes) == 1, f"retry must create exactly one product code, got {codes}")
+    retry_code = codes[0]
+
+    check(retry_code != orphan_code,
+          "retry must not silently reuse the orphaned code from the failed attempt as if nothing happened")
+    check(m.product_exists(retry_code) is True, "the retried, COMMITTED product must be visible")
+    check(m.is_op_committed(op_id) is True, "retry's own transaction must have reached COMMITTED")
+
+    visible_codes = [p["code"] for p in m.visible_products()]
+    check(visible_codes.count(retry_code) == 1,
+          f"exactly one ACTIVE catalogue entry may exist for the retried product, got {visible_codes}")
+    check(len(visible_codes) == len(set(visible_codes)),
+          f"no two visible/active product rows may share the same code, got {visible_codes}")
+    # The orphaned code from the failed attempt permanently stays a gap (never becomes visible) -
+    # this is an accepted trade-off (like a SQL auto-increment gap), not a collision.
+    check(orphan_code not in visible_codes, "the orphaned code must never become visible, even after a later retry")
+
+
 TESTS = [
     test_fifo_two_lots,
     test_fifo_shortage_rejects_whole_document,
@@ -659,6 +798,10 @@ TESTS = [
     test_repeated_partial_return_uses_next_allocation_not_the_first_again,
     test_validation_does_not_create_product_until_full_plan_valid,
     test_multiline_batch_produces_exactly_one_document,
+    test_tx_protocol_validation_failure_creates_no_product,
+    test_tx_protocol_failure_before_prepared_creates_no_product,
+    test_tx_protocol_failure_after_prepared_before_committed_leaves_product_invisible,
+    test_tx_protocol_retry_after_failure_is_idempotent_no_bad_code_reuse,
 ]
 
 

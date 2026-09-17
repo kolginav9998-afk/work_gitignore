@@ -385,6 +385,67 @@ Public Function PRIME_SequenceNext(ByVal seqName As String) As Long
     PRIME_SequenceNext = nextVal
 End Function
 
+' Только чтение: последнее выданное значение последовательности (0, если ни разу не
+' использовалась) - НИЧЕГО не пишет. Нужна для планирования (validation) новых ЕИ-кодов ДО того,
+' как транзакция дошла до PREPARED: transaction protocol запрещает физическую запись до
+' SYS_PRIME_TX.STATE=PREPARED, но код товара должен быть решён заранее, чтобы попасть в план.
+' Следующий код = PRIME_PeekSequenceValue(...) + 1 (то же самое "+1 от текущего", что и
+' PRIME_SequenceNext, чтобы peek и реальная выдача никогда не расходились).
+Public Function PRIME_PeekSequenceValue(ByVal seqName As String) As Long
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SYS_SEQ)
+    Dim colName As Long, colValue As Long
+    colName = PRIME_ColIndex(headers, "SEQ_NAME")
+    colValue = PRIME_ColIndex(headers, "NEXT_VALUE")
+
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_SYS_SEQ)
+    Dim rowIdx As Long
+    rowIdx = PRIME_FindRowByKey(table, colName, seqName)
+
+    If rowIdx = -1 Then
+        PRIME_PeekSequenceValue = 0
+    Else
+        PRIME_PeekSequenceValue = CLng(table(rowIdx)(colValue))
+    End If
+End Function
+
+' Персистентно фиксирует значение последовательности РОВНО в newValue (создаёт строку, если её
+' ещё нет). Используется на стадии физической записи (после PREPARED), чтобы зафиксировать сдвиг
+' счётчика, уже решённый на стадии планирования через PRIME_PeekSequenceValue - в отличие от
+' PRIME_SequenceNext (семантика "+1 от текущего"), здесь пишется точное заранее вычисленное число.
+Public Sub PRIME_AdvanceSequenceTo(ByVal seqName As String, ByVal newValue As Long)
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SYS_SEQ)
+    Dim colName As Long, colValue As Long
+    colName = PRIME_ColIndex(headers, "SEQ_NAME")
+    colValue = PRIME_ColIndex(headers, "NEXT_VALUE")
+
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_SYS_SEQ)
+    Dim rowIdx As Long
+    rowIdx = PRIME_FindRowByKey(table, colName, seqName)
+
+    If rowIdx = -1 Then
+        Dim newRow(UBound(table(0))) As Variant
+        newRow(colName) = seqName
+        newRow(colValue) = newValue
+        Dim rows(0) As Variant
+        rows(0) = newRow
+        PRIME_AppendRowsBatch(SH_SYS_SEQ, rows)
+    Else
+        Dim updRow(UBound(table(rowIdx))) As Variant
+        Dim c As Long
+        For c = 0 To UBound(table(rowIdx))
+            updRow(c) = table(rowIdx)(c)
+        Next c
+        updRow(colValue) = newValue
+        Dim updRows(0) As Variant
+        updRows(0) = updRow
+        PRIME_UpdateRowsBatch(SH_SYS_SEQ, rowIdx, updRows)
+    End If
+End Sub
+
 ' --- SYS_PRIME_META: простой key/value (версии, текущая сессия инвентаризации и т.п.) ---
 Public Function PRIME_MetaGet(ByVal key As String) As String
     If Not PRIME_SheetExists(SH_SYS_META) Then
