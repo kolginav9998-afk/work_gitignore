@@ -13,3 +13,13 @@ __pycache__/
 
 # (Опционально) Игнорируем файл с чувствительными данными (пароли, ключи)
 .env
+
+# PRIME: локальные/CI сборочные артефакты и рантайм-данные - не коммитим
+prime_project/build/
+prime_project/dist/
+prime_project/**/Backups/
+prime_project/**/Diagnostics/*.log
+prime_project/**/Acts/
+prime_project/**/Exports/
+*.lock
+.~lock.*#

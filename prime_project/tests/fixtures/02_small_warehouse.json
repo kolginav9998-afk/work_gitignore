@@ -1,0 +1,35 @@
+{
+  "scenario": "small_warehouse",
+  "description": "Малый синтетический склад: 5 товаров, 3 места хранения, смешанная история из приходов и выдач.",
+  "products": [
+    {"PRODUCT_CODE": "ЕИ-00000001", "PRODUCT_NAME": "Тестовый товар A", "BASE_UNIT": "шт", "DEFAULT_LOCATION": "Sklad-1", "CATEGORY": "Тест", "SUBCATEGORY": "Общее", "ACTIVE": 1},
+    {"PRODUCT_CODE": "ЕИ-00000002", "PRODUCT_NAME": "Тестовый товар B", "BASE_UNIT": "кг", "DEFAULT_LOCATION": "Sklad-1", "CATEGORY": "Тест", "SUBCATEGORY": "Общее", "ACTIVE": 1},
+    {"PRODUCT_CODE": "ЕИ-00000003", "PRODUCT_NAME": "Тестовый товар C", "BASE_UNIT": "шт", "DEFAULT_LOCATION": "Sklad-2", "CATEGORY": "Тест", "SUBCATEGORY": "Расходники", "ACTIVE": 1},
+    {"PRODUCT_CODE": "ЕИ-00000004", "PRODUCT_NAME": "Тестовый товар D", "BASE_UNIT": "уп", "DEFAULT_LOCATION": "Sklad-2", "CATEGORY": "Тест", "SUBCATEGORY": "Расходники", "ACTIVE": 1},
+    {"PRODUCT_CODE": "ЕИ-00000005", "PRODUCT_NAME": "Тестовый товар E", "BASE_UNIT": "шт", "DEFAULT_LOCATION": "Sklad-3", "CATEGORY": "Тест", "SUBCATEGORY": "Прочее", "ACTIVE": 1}
+  ],
+  "product_units": [
+    {"PRODUCT_CODE": "ЕИ-00000004", "UNIT_NAME": "шт", "FACTOR_TO_BASE": 0.1, "ACTIVE": 1}
+  ],
+  "locations": ["Sklad-1", "Sklad-2", "Sklad-3"],
+  "documents": [
+    {"DOC_ID": "DOC-00000001", "DOC_TYPE": "RECEIPT", "SOURCE_KEY": "FIXTURE-RECEIPT-1"},
+    {"DOC_ID": "DOC-00000002", "DOC_TYPE": "RECEIPT", "SOURCE_KEY": "FIXTURE-RECEIPT-2"},
+    {"DOC_ID": "DOC-00000003", "DOC_TYPE": "ISSUE", "SOURCE_KEY": "FIXTURE-ISSUE-1"}
+  ],
+  "movements_summary": [
+    {"PRODUCT_CODE": "ЕИ-00000001", "LOCATION": "Sklad-1", "QTY_BASE": 50},
+    {"PRODUCT_CODE": "ЕИ-00000002", "LOCATION": "Sklad-1", "QTY_BASE": 30},
+    {"PRODUCT_CODE": "ЕИ-00000003", "LOCATION": "Sklad-2", "QTY_BASE": 20},
+    {"PRODUCT_CODE": "ЕИ-00000001", "LOCATION": "Sklad-1", "QTY_BASE": -10}
+  ],
+  "expected": {
+    "total_stock_by_product": {
+      "ЕИ-00000001": 40,
+      "ЕИ-00000002": 30,
+      "ЕИ-00000003": 20,
+      "ЕИ-00000004": 0,
+      "ЕИ-00000005": 0
+    }
+  }
+}

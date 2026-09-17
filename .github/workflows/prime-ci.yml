@@ -1,0 +1,118 @@
+name: prime-ci
+
+on:
+  pull_request:
+    paths:
+      - "prime_project/**"
+      - ".github/workflows/prime-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "prime_project/**"
+      - ".github/workflows/prime-ci.yml"
+
+defaults:
+  run:
+    working-directory: prime_project
+
+jobs:
+  prime-static:
+    name: prime-static (source checks, no LibreOffice)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run source-level static checks
+        run: python3 tools/static_check_source.py
+
+  prime-build:
+    name: prime-build (assemble .ods via headless LibreOffice)
+    runs-on: ubuntu-latest
+    needs: prime-static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LibreOffice Calc + Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+      # No actions/setup-python here: it would put its own interpreter ahead of the
+      # system python3 in PATH, and python3-uno (installed above) only registers against
+      # the system python3 - `import uno` fails under a setup-python interpreter.
+      - name: Build ПОКАТАК_PRIME.ods
+        run: |
+          mkdir -p build
+          xvfb-run -a python3 tools/build_ods.py --output build/ПОКАТАК_PRIME_PR_BUILD.ods
+      - name: Generate build manifest
+        run: |
+          python3 tools/build_manifest.py \
+            --ods build/ПОКАТАК_PRIME_PR_BUILD.ods \
+            --output build/build_manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prime-build-artifacts
+          path: |
+            prime_project/build/ПОКАТАК_PRIME_PR_BUILD.ods
+            prime_project/build/build_manifest.json
+
+  prime-ods-validate:
+    name: prime-ods-validate (structural checks on built .ods)
+    runs-on: ubuntu-latest
+    needs: prime-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LibreOffice Calc + Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+      # No actions/setup-python here - see note in prime-build (python3-uno needs the
+      # system python3, not a setup-python-managed interpreter).
+      - uses: actions/download-artifact@v4
+        with:
+          name: prime-build-artifacts
+          path: prime_project/build
+      - name: Run structural validation
+        run: |
+          xvfb-run -a python3 tests/static_checks.py build/ПОКАТАК_PRIME_PR_BUILD.ods \
+            | tee validation_report.txt
+          python3 tools/validation_report_to_json.py validation_report.txt validation_report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prime-validation-report
+          path: prime_project/validation_report.json
+
+  prime-tests:
+    name: prime-tests (pure-Python model tests)
+    runs-on: ubuntu-latest
+    needs: prime-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run model tests
+        run: python3 tests/model_tests.py | tee TEST_REPORT.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prime-test-report
+          path: prime_project/TEST_REPORT.md
+
+  prime-libreoffice-linux-smoke:
+    name: prime-libreoffice-linux-smoke (open/save/reopen persistence)
+    runs-on: ubuntu-latest
+    needs: prime-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LibreOffice Calc + Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+      # No actions/setup-python here - see note in prime-build.
+      - uses: actions/download-artifact@v4
+        with:
+          name: prime-build-artifacts
+          path: prime_project/build
+      - name: Open, save, reopen - verify the file survives an LibreOffice round trip
+        run: |
+          xvfb-run -a python3 tools/smoke_open_save_reopen.py build/ПОКАТАК_PRIME_PR_BUILD.ods

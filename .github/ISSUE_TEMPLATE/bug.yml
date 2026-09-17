@@ -1,0 +1,94 @@
+name: "🐛 Ошибка / некорректное поведение"
+description: "Сообщить о дефекте в ПОКАТАК PRIME"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Пожалуйста, НЕ прикладывайте реальные накладные, УПД, документы поставщиков или
+        полную базу склада. Достаточно версии, шагов и текста ошибки — при необходимости
+        прикрепите синтетический пример (см. `tests/fixtures/`), а не реальные данные.
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия ПОКАТАК
+      placeholder: "напр. 2.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Git commit SHA сборки (если известен)
+      placeholder: "напр. 4bc9b69"
+    validations:
+      required: false
+
+  - type: input
+    id: lo_version
+    attributes:
+      label: Версия LibreOffice
+      placeholder: "Справка → О программе"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Операционная система
+      placeholder: "напр. Windows 11 / Ubuntu 22.04"
+    validations:
+      required: true
+
+  - type: textarea
+    id: operation
+    attributes:
+      label: Какая операция выполнялась
+      description: "Например: проведение выдачи, возврат, миграция"
+    validations:
+      required: true
+
+  - type: input
+    id: op_id
+    attributes:
+      label: OP_ID (если есть в сообщении об ошибке или в SYS_PRIME_TX/DB_PRIME_AUDIT)
+    validations:
+      required: false
+
+  - type: input
+    id: last_stage
+    attributes:
+      label: Последний успешный этап (STAGE из DB_PRIME_AUDIT, если доступен)
+      placeholder: "напр. TX_PREPARED, LINES_WRITTEN"
+    validations:
+      required: false
+
+  - type: textarea
+    id: error_text
+    attributes:
+      label: Текст ошибки
+      description: "Скопируйте точный текст сообщения об ошибке, если было"
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        Если доступен файл `prime_runtime.log` или содержимое `DB_PRIME_AUDIT` за момент
+        ошибки — приложите его как файл к issue (drag & drop). НЕ прикладывайте по умолчанию
+        реальные накладные, УПД, документы поставщиков или полную базу склада.

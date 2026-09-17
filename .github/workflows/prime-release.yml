@@ -1,0 +1,91 @@
+name: prime-release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+defaults:
+  run:
+    working-directory: prime_project
+
+jobs:
+  build-and-verify:
+    name: Full CI gate before release (build + validate + tests + smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LibreOffice Calc + Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+      # No actions/setup-python: it would put its own interpreter ahead of the system
+      # python3 in PATH, and python3-uno (installed above) only registers against the
+      # system python3 - `import uno` fails under a setup-python-managed interpreter.
+
+      - name: prime-static
+        run: python3 tools/static_check_source.py
+
+      - name: prime-build
+        run: |
+          mkdir -p dist
+          xvfb-run -a python3 tools/build_ods.py --output dist/ПОКАТАК_PRIME_2.0.0.ods
+
+      - name: prime-ods-validate
+        run: |
+          xvfb-run -a python3 tests/static_checks.py dist/ПОКАТАК_PRIME_2.0.0.ods | tee validation_report.txt
+          python3 tools/validation_report_to_json.py validation_report.txt dist/validation_report.json
+
+      - name: prime-tests
+        run: python3 tests/model_tests.py | tee dist/TEST_REPORT.md
+
+      - name: prime-libreoffice-linux-smoke
+        run: xvfb-run -a python3 tools/smoke_open_save_reopen.py dist/ПОКАТАК_PRIME_2.0.0.ods
+
+      - name: Generate build manifest
+        run: |
+          python3 tools/build_manifest.py \
+            --ods dist/ПОКАТАК_PRIME_2.0.0.ods \
+            --output dist/build_manifest.json \
+            --test-summary dist/TEST_REPORT.md
+
+      - name: Copy release documentation into dist/
+        run: |
+          cp docs/CHANGELOG.md dist/CHANGELOG_PRIME.md
+          cp docs/MIGRATION.md dist/MIGRATION_1.4.1_TO_2.0.md
+          cp НАЧАТЬ_PRIME.txt dist/НАЧАТЬ_PRIME.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prime-release-assets
+          path: |
+            prime_project/dist/ПОКАТАК_PRIME_2.0.0.ods
+            prime_project/dist/НАЧАТЬ_PRIME.txt
+            prime_project/dist/CHANGELOG_PRIME.md
+            prime_project/dist/MIGRATION_1.4.1_TO_2.0.md
+            prime_project/dist/TEST_REPORT.md
+            prime_project/dist/build_manifest.json
+            prime_project/dist/validation_report.json
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-and-verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: prime-release-assets
+          path: dist
+      - name: Create GitHub Release with build assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ПОКАТАК_PRIME_2.0.0.ods
+            dist/НАЧАТЬ_PRIME.txt
+            dist/CHANGELOG_PRIME.md
+            dist/MIGRATION_1.4.1_TO_2.0.md
+            dist/TEST_REPORT.md
+            dist/build_manifest.json
+          generate_release_notes: true

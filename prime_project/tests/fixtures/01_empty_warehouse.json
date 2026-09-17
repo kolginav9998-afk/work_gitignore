@@ -1,0 +1,17 @@
+{
+  "scenario": "empty_warehouse",
+  "description": "Пустой склад сразу после установки схемы (PRIME_Install_EnsureSchema), до первого документа.",
+  "products": [],
+  "product_units": [],
+  "lots": [],
+  "documents": [],
+  "doc_lines": [],
+  "movements": [],
+  "allocations": [],
+  "returns": [],
+  "aliases": [],
+  "expected": {
+    "total_stock_by_product": {},
+    "notes": "PRIME_TotalLotBalance для любого кода товара должен вернуть 0; PRIME_FindCommittedBySourceKey для любого SOURCE_KEY должен вернуть пустую строку."
+  }
+}
