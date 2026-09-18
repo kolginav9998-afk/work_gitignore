@@ -63,19 +63,10 @@ def main():
 {model_counts}
 ```
 
-## POST-REVIEW FIX (this build): transaction protocol + dead control removal
+## KEY CHANGES (this build)
 
-- **Transaction protocol.** Физическая запись нового товара в `DB_PRIME_PRODUCTS` теперь
-  происходит строго ПОСЛЕ записи `SYS_PRIME_TX.STATE=PREPARED` (было — до неё, блокирующее
-  замечание ревью). 4 новых fault-injection теста в `tests/model_tests.py` (входят в счёт ниже)
-  проверяют: отказ валидации не создаёт товар; отказ до PREPARED не создаёт товар; отказ после
-  PREPARED, но до COMMITTED, оставляет строку физически существующей, но невидимой обычному
-  поиску товара; повторная попытка после отказа идемпотентна и не создаёт дублирующийся активный
-  код. Подробности — `docs/REQUIREMENTS_MATRIX.md` R31, `docs/CHANGELOG.md`.
-- **0 dead controls (усиление R26).** 24 обсолетные кнопки теперь физически удаляются
-  (модель контрола + `ControlShape`), а не просто скрываются `EnableVisible=False`. Проверено
-  `tests/static_checks.py` ("0 surviving dead controls"/"0 surviving dead ControlShapes") и
-  логом сборки ("removed 24 dead controls (of 24 mapped for removal)").
+См. `docs/CHANGELOG.md` (раздел `[{args.version}]`) для полного списка изменений этой сборки -
+не дублируется здесь построчно, чтобы не расходиться с ним при последующих релизах.
 
 ## NOT EXECUTED / REQUIRES MANUAL TEST
 

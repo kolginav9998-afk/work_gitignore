@@ -5,8 +5,8 @@ Option Explicit
 ' Никакой логики I/O здесь быть не должно (см. forbidden: очень крупные монолитные функции,
 ' циклические зависимости) - только константы и простые справочные функции.
 
-Public Const PRIME_SCHEMA_VERSION As String = "2.1.1"
-Public Const PRIME_BUILD_DATE As String = "2026-09-17"
+Public Const PRIME_SCHEMA_VERSION As String = "2.1.2"
+Public Const PRIME_BUILD_DATE As String = "2026-09-18"
 
 ' --- Контуры остатка (stock_architecture, PRIME 2.1.0; +PRODUCTION в 2.1.2) ---
 ' Один и тот же товар может физически лежать в независимо учитываемых контурах: общий склад
