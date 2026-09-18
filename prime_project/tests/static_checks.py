@@ -368,6 +368,27 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             meta_sheet_exists = doc.Sheets.hasByName("SYS_PRIME_META")
             check("SYS_PRIME_META present (schema installed)", meta_sheet_exists)
 
+            # --- clean_release (FINAL mega-task, confirmed bug #8): a freshly built ODS (straight
+            # from the 1.4.1 template, no manual posting) must start with an EMPTY ledger - a
+            # plain schema install/migration never calls PRIME_PostDocument, so any row here would
+            # mean either a build step wrongly auto-posts something or a developer's manual test
+            # data leaked into this specific build. Business/reference sheets (Заказы, catalog)
+            # keep their real migrated 1.4.1 data - only the LEDGER tables must be empty.
+            ledger_sheets = ["DB_PRIME_DOCUMENTS", "DB_PRIME_DOC_LINES", "DB_PRIME_MOVEMENTS",
+                             "DB_PRIME_LOTS", "DB_PRIME_ALLOCATIONS", "DB_PRIME_RETURNS",
+                             "DB_PRIME_RETURN_ALLOCATIONS", "DB_PRIME_ACTS"]
+            non_empty_ledgers = []
+            for sh_name in ledger_sheets:
+                if not doc.Sheets.hasByName(sh_name):
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                cursor = sh.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                if cursor.RangeAddress.EndRow > 0:
+                    non_empty_ledgers.append(f"{sh_name} (last row {cursor.RangeAddress.EndRow})")
+            check("clean build: 0 documents/movements/lots/acts (no developer test data)",
+                  len(non_empty_ledgers) == 0, f"non-empty ledger sheets: {non_empty_ledgers}")
+
         finally:
             doc.close(False)
     finally:

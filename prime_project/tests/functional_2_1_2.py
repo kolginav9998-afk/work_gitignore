@@ -373,6 +373,33 @@ def main():
         check(contour_by_code.get(code_det) == "WORKSHOP_DETAILS",
               f"Приход — Детали posts to WORKSHOP_DETAILS contour (got {contour_by_code.get(code_det)!r})")
 
+        # === Расход — Производство: same engine as Расход — Офис, never end-to-end tested until
+        # now (task #61 gap) - debits the specific EI, balance stays scoped to its LOCATION ===
+        print("=== Расход — Производство (matching-tag issue) ===")
+        issue_prod_sheet = doc.Sheets.getByName("Расход — Производство")
+        issue_prod_headers = header_map(doc, "Расход — Производство")
+        iprow = max(last_row(doc, issue_prod_sheet) + 1, first_data_row(doc, "Расход — Производство"))
+        issue_prod_sheet.getCellByPosition(issue_prod_headers.index("Внутренний код"), iprow).setString(code_prod)
+        issue_prod_sheet.getCellByPosition(issue_prod_headers.index("Количество"), iprow).setValue(2)
+        invoke_macro(doc, "PRIME_07_Workflows.PRIME_Workflow_ConductRow", (issue_prod_sheet, iprow))
+        balance_after_matching_issue = invoke_macro(
+            doc, "PRIME_04_Posting.PRIME_LocationContourBalance", (code_prod, "Цех-1", ""))[0]
+        check(balance_after_matching_issue == 3,
+              f"Расход — Производство debits its own EI (5 - 2 = 3, got {balance_after_matching_issue})")
+
+        # === single_physical_warehouse / confirmed bug #1: generic "Выдачи" must debit ANY valid
+        # EI_CODE regardless of its origin tag - issuing a PRODUCTION-origin EI here proves it is
+        # no longer hardcoded to GENERAL/Заказы-only stock. ===
+        print("=== Выдачи (cross-tag issue of a PRODUCTION-origin EI) ===")
+        cross_row = max(last_row(doc, issues_sheet) + 1, 1)
+        issues_sheet.getCellByPosition(issues_headers.index("Код"), cross_row).setString(code_prod)
+        issues_sheet.getCellByPosition(issues_headers.index("Кол-во"), cross_row).setValue(1)
+        invoke_macro(doc, "PRIME_06_Issues.PRIME_Issues_ConductRow", (issues_sheet, cross_row))
+        balance_after_cross_tag_issue = invoke_macro(
+            doc, "PRIME_04_Posting.PRIME_LocationContourBalance", (code_prod, "Цех-1", ""))[0]
+        check(balance_after_cross_tag_issue == 2,
+              f"generic Выдачи debits a PRODUCTION-origin EI just like any other (3 - 1 = 2, got {balance_after_cross_tag_issue})")
+
         # === Acts: no external document number, auto "АКТ-YYYYMMDD-NNNN" numbering ===
         # NOTE: this CI/dev environment only installs libreoffice-calc (see .github/workflows/
         # prime-ci.yml) - PRIME_Acts_CreateAct needs the Writer (swriter) factory to build the
