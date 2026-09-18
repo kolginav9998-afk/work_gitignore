@@ -583,6 +583,48 @@ def test_repeated_partial_return_uses_next_allocation_not_the_first_again():
           f"second partial return must move on to LOT-B, not re-credit LOT-A, got {second}")
 
 
+# --- confirmed bug #7 (returns.forbidden, FINAL mega-task): a return that cannot be traced to a
+# real allocation must be BLOCKED, never posted as an untraceable/empty-LOT movement -----------
+def validate_return_traceable_allocation(qty_requested, allocations, already_returned_per_alloc):
+    """Mirrors PRIME_04_Posting.PRIME_ValidateReturn's new allocation-availability check: sums
+    what is still traceably available across all real allocations for this doc line and rejects
+    the whole document if the requested return exceeds it - mirroring the ledger-level
+    issued/returned check that already existed, but at the allocation level."""
+    total_traceable = 0.0
+    for alloc_id, _lot_id, alloc_qty in allocations:
+        available = alloc_qty - already_returned_per_alloc.get(alloc_id, 0.0)
+        if available > 0:
+            total_traceable += available
+    if qty_requested > total_traceable + 1e-6:
+        raise TestFailure(
+            f"возврат нельзя однозначно привязать к партии(ям) исходной выдачи "
+            f"(не хватает {qty_requested - total_traceable:.4f} ед. отслеживаемых allocation)")
+    return True
+
+
+def test_legacy_return_without_allocation_is_blocked_not_posted_untraceable():
+    # Legacy issue line with NO allocation rows at all (predates allocation tracking) - the old
+    # bug: PRIME_PostReturnLines would silently post an empty-LOT/DEFAULT_LOCATION movement here
+    # instead of refusing the document (returns.forbidden: "fallback to DEFAULT_LOCATION",
+    # "return with empty LOT/EI").
+    try:
+        validate_return_traceable_allocation(5.0, [], {})
+        raise TestFailure("expected the return to be rejected - no allocation exists at all")
+    except TestFailure as e:
+        check("нельзя однозначно привязать" in str(e), f"wrong rejection: {e}")
+
+    # Partial coverage: allocation exists but only covers part of the requested return qty.
+    try:
+        validate_return_traceable_allocation(5.0, [("ALC-A", "LOT-A", 3.0)], {})
+        raise TestFailure("expected the return to be rejected - allocation only covers 3 of 5")
+    except TestFailure as e:
+        check("не хватает" in str(e), f"wrong rejection: {e}")
+
+    # Full coverage must still be accepted (this is not a blanket return-blocker).
+    check(validate_return_traceable_allocation(5.0, [("ALC-A", "LOT-A", 5.0)], {}) is True,
+          "a return fully covered by a real allocation must still be accepted")
+
+
 # --- R11: validation must not create a product record before the whole plan is confirmed valid ---
 def test_validation_does_not_create_product_until_full_plan_valid():
     created_products = []
@@ -1116,6 +1158,7 @@ TESTS = [
     test_transfer_preserves_lot_lineage_and_fifo_age,
     test_inventory_adjustment_keeps_stock_equal_to_sum_of_lots,
     test_repeated_partial_return_uses_next_allocation_not_the_first_again,
+    test_legacy_return_without_allocation_is_blocked_not_posted_untraceable,
     test_validation_does_not_create_product_until_full_plan_valid,
     test_multiline_batch_produces_exactly_one_document,
     test_tx_protocol_validation_failure_creates_no_product,

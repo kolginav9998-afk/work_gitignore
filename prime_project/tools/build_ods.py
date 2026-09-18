@@ -162,6 +162,7 @@ ARCHIVE_STUB = "Standard.PRIME_12_UI.PRIME_Legacy_ArchiveStub"
 # see the "Из заказов" comment next to WMS_STOCK_SEARCH in BUTTON_MAP above.
 RELABEL_MAP = {
     ("Наличие", "WMS_STOCK_SEARCH"): "Из заказов",
+    ("Заказы", "WMS_ORD_BTN_CONDUCT"): "Провести приход",
 }
 
 BUTTON_MAP = {
@@ -184,10 +185,16 @@ BUTTON_MAP = {
     ("Инфо", "WMS_EXPORT_REPORT_DATA"): HIDE,
     ("Инфо", "pa_control_111"): "Standard.PRIME_12_UI.PRIME_Nav_Dashboard",
     ("Инфо", "pa_control_112"): "Standard.PRIME_12_UI.PRIME_Nav_Report",
-    # Заказы
+    # Заказы. confirmed bug #6 (remove_duplicate_buttons): the 1.4.1 template binds TWO buttons
+    # to PRIME_Orders_NewOrder ("Новый заказ" and "Новый приход" - the latter's own label was
+    # actively wrong, since this handler only creates a draft order row with no stock movement)
+    # and TWO to PRIME_Orders_ConductSelectedButton ("Провести позицию" and "Провести заказ").
+    # Each pair is collapsed to a single button; the survivor is relabelled to the mega-prompt's
+    # own vocabulary ("Провести приход" - see RELABEL_MAP) since that is exactly what posting the
+    # selected row does (mints RECEIPT/EI_CODE/lot/movement from "Факт. количество").
     ("Заказы", "WMS_ORD_BTN_NEW"): "Standard.PRIME_05_Orders.PRIME_Orders_NewOrder",
-    ("Заказы", "WMS_ORD_BTN_UNIVERSAL"): "Standard.PRIME_05_Orders.PRIME_Orders_NewOrder",
-    ("Заказы", "WMS_ORD_BTN_CONDUCT_POS"): "Standard.PRIME_05_Orders.PRIME_Orders_ConductSelectedButton",
+    ("Заказы", "WMS_ORD_BTN_UNIVERSAL"): HIDE,
+    ("Заказы", "WMS_ORD_BTN_CONDUCT_POS"): HIDE,
     ("Заказы", "WMS_ORD_BTN_CONDUCT"): "Standard.PRIME_05_Orders.PRIME_Orders_ConductSelectedButton",
     ("Заказы", "WMS_ORD_BTN_CONDUCTALL"): "Standard.PRIME_05_Orders.PRIME_Orders_ConductAllReadyButton",
     ("Заказы", "WMS_ORD_BTN_LOTUNITS"): HIDE,

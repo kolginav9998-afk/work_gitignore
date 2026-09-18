@@ -417,6 +417,37 @@ Private Function PRIME_ValidateReturn(ByRef plan As PrimeDocPlan, ByRef errMsg A
             PRIME_ValidateReturn = False
             Exit Function
         End If
+
+        ' FINAL mega-task (returns.forbidden, confirmed bug #7): доступный "остаток к возврату"
+        ' (issuedQty - returnedQty выше) - это ТОЛЬКО ledger-проверка по сумме документа; она не
+        ' гарантирует, что эту сумму реально можно привязать к конкретной партии(ям), с которой
+        ' была выдача (allocations). Раньше PRIME_PostReturnLines в этом случае (легаси-выдача без
+        ' allocation) молча заводила "безлотовое" движение с LOT_ID="" - ровно то самое
+        ' "credited to an untraceable/DEFAULT position", что прямо запрещено. Теперь считаем то же
+        ' самое общее доступное количество ЗАРАНЕЕ (без записи - zero_writes_during_validation) и
+        ' блокируем документ понятным сообщением, если traceable-allocation не хватает.
+        Dim availLots() As String
+        Dim availQtys() As Double
+        PRIME_AllocationsForDocLine(plan.Lines(i).OriginalDocLineId, availLots, availQtys)
+        Dim totalTraceable As Double
+        totalTraceable = 0
+        If UBound(availLots) >= LBound(availLots) Then
+            Dim k As Long
+            For k = LBound(availLots) To UBound(availLots)
+                Dim allocId2 As String
+                allocId2 = "ALC-" & plan.Lines(i).OriginalDocLineId & "-" & availLots(k)
+                Dim avail2 As Double
+                avail2 = availQtys(k) - PRIME_AlreadyReturnedForAllocation(allocId2)
+                If avail2 > 0 Then totalTraceable = totalTraceable + avail2
+            Next k
+        End If
+        If plan.Lines(i).QtyBase > totalTraceable + 0.0000005 Then
+            errMsg = "Строка " & (i + 1) & ": возврат нельзя однозначно привязать к партии(ям) исходной выдачи (не хватает " & _
+                Format(plan.Lines(i).QtyBase - totalTraceable, "0.####") & " ед. отслеживаемых allocation) - оформление запрещено, " & _
+                "чтобы не создать неотслеживаемый остаток."
+            PRIME_ValidateReturn = False
+            Exit Function
+        End If
     Next i
     PRIME_ValidateReturn = True
 End Function
@@ -965,12 +996,16 @@ Private Sub PRIME_PostReturnLines(ByVal docId As String, ByVal opId As String, B
             Next j
         End If
         If remaining > 0.0000005 Then
-            ' Исходная выдача не найдена по allocations (например, легаси-данные без миграции
-            ' allocations) - возврат всё равно проводим на условное "безлотовое" движение,
-            ' чтобы не заблокировать документ, но это ухудшает трассируемость партии.
-            PRIME_WriteMovementRow oMoveSheet, moveHeaders, moveRow, docId, PRIME_LineIdFor(i), plan.Lines(i).ProductCode, _
-                "", remaining, plan.Lines(i).LocationTo, plan.DocDate, opId, plan.Lines(i).Contour
-            moveRow = moveRow + 1
+            ' FINAL mega-task (returns.forbidden, confirmed bug #7): раньше здесь заводилось
+            ' условное "безлотовое" движение (LOT_ID="") в DEFAULT_LOCATION/GENERAL, чтобы не
+            ' заблокировать документ - именно запрещённый "return with empty LOT/EI"/"fallback to
+            ' DEFAULT_LOCATION". PRIME_ValidateReturn теперь считает то же самое traceable-
+            ' количество ДО этого места и отклоняет документ целиком, если его не хватает - если
+            ' мы всё же сюда попали, это значит расхождение между валидацией и проведением
+            ' (например, allocations изменились между шагами одной транзакции), что само по себе
+            ' ошибка протокола - отменяем проведение, а не создаём неотслеживаемый остаток.
+            Err.Raise 1023, "PRIME_Posting.PRIME_PostReturnLines", _
+                "Возврат по строке " & (i + 1) & " не может быть привязан к партии исходной выдачи после валидации - проведение отменено."
         End If
 
         oRetSheet.getCellByPosition(colRetId, retRow).setString(returnId)
