@@ -151,6 +151,29 @@ def main():
         bal_a_after = orders.getCellByPosition(9, 1).getValue()
         check(bal_a_after == 4, f"остаток EI-A НЕ изменился после блокировки (got {bal_a_after})")
 
+        # === Идемпотентность: повторный клик "Провести всё" не портит уже проведённые строки ===
+        print("=== Идемпотентность: повторный клик 'Провести всё' ===")
+        invoke_macro(doc, "Orders_ConductAllButton")
+        check(orders.getCellByPosition(8, 1).getString() == ei_a, "повторное 'Провести всё' (Заказы) не меняет уже присвоенный EI-A")
+        check(orders.getCellByPosition(8, 2).getString() == ei_b, "повторное 'Провести всё' (Заказы) не меняет уже присвоенный EI-B")
+        invoke_macro(doc, "Issues_ConductAllButton")
+        check(orders.getCellByPosition(9, 1).getValue() == 4, "повторное 'Провести всё' (Выдачи) не меняет остаток EI-A (по-прежнему 4)")
+        check(orders.getCellByPosition(9, 2).getValue() == 0, "повторное 'Провести всё' (Выдачи) не меняет остаток EI-B (по-прежнему 0)")
+
+        # === Неизвестный ЕИ-код в "Выдачи" ===
+        print("=== Неизвестный ЕИ-код блокируется с понятным сообщением ===")
+        set_row(issues, 7, {0: "2026-01-01", 1: "ЕИ-99999999", 3: 1.0})
+        invoke_macro(doc, "Issues_ConductAllButton")
+        status_unknown = issues.getCellByPosition(10, 7).getString()
+        check("не найден" in status_unknown, f"неизвестный ЕИ даёт понятное сообщение, не тихий сбой (got {status_unknown!r})")
+
+        # === Проверка типов валидации данных (выпадающий список Ед.изм., числовое Количество) ===
+        print("=== Валидация ячеек (Ед.изм. список, Количество только число) ===")
+        unit_validation = issues.getCellRangeByPosition(4, 1, 4, 1).Validation
+        check(unit_validation.Type == builder.VALIDATION_LIST, f"Ед.изм. на 'Выдачи' - выпадающий список (got type={unit_validation.Type})")
+        qty_validation = issues.getCellRangeByPosition(3, 1, 3, 1).Validation
+        check(qty_validation.Type == builder.VALIDATION_DECIMAL, f"Количество на 'Выдачи' - только число >= 0 (got type={qty_validation.Type})")
+
         # === Наличие: одна строка на каждый EI ===
         print("=== Наличие ===")
         stock = doc.Sheets.getByName("Наличие")
