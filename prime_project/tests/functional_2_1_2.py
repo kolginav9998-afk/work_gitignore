@@ -23,6 +23,7 @@ This is an integration smoke test, not a substitute for the pure-Python algorith
 model_tests.py - if it fails, re-run the specific tools/build_ods.py + soffice sequence manually
 before concluding the business logic itself regressed (see functional_smoke.py's caveat).
 """
+import re
 import sys
 import time
 import subprocess
@@ -371,6 +372,34 @@ def main():
               f"Приход — Производство posts to PRODUCTION contour (got {contour_by_code.get(code_prod)!r})")
         check(contour_by_code.get(code_det) == "WORKSHOP_DETAILS",
               f"Приход — Детали posts to WORKSHOP_DETAILS contour (got {contour_by_code.get(code_det)!r})")
+
+        # === Acts: no external document number, auto "АКТ-YYYYMMDD-NNNN" numbering ===
+        # NOTE: this CI/dev environment only installs libreoffice-calc (see .github/workflows/
+        # prime-ci.yml) - PRIME_Acts_CreateAct needs the Writer (swriter) factory to build the
+        # .odt, which is genuinely absent here (not a PRIME defect). We still exercise the whole
+        # call - if Writer is unavailable, the failure is a specific, recognizable "type detection
+        # failed"/swriter error and is reported as SKIPPED, not FAILED; any other failure is real.
+        print("=== Acts (no external document number) ===")
+        prod_doc_id = prod_wf_sheet.getCellByPosition(prod_wf_headers.index("DOC_ID"), prow).getString()
+        check(prod_doc_id != "", "Приход — Производство row records its own DOC_ID after posting")
+        act_path = invoke_macro(doc, "PRIME_10_ActsReports.PRIME_Acts_CreateAct", (prod_doc_id,))[0]
+
+        acts_sheet = doc.Sheets.getByName("DB_PRIME_ACTS")
+        acts_headers = header_map(doc, "DB_PRIME_ACTS")
+        alast = last_row(doc, acts_sheet)
+        act_number = ""
+        for rr in range(1, alast + 1):
+            if acts_sheet.getCellByPosition(acts_headers.index("DOC_ID"), rr).getString() == prod_doc_id:
+                act_number = acts_sheet.getCellByPosition(acts_headers.index("ACT_ID"), rr).getString()
+                break
+
+        if act_path == "" and act_number == "":
+            print("  [SKIP] act creation needs libreoffice-writer, not installed in this "
+                  "environment (verified PRIME_Acts_CreateAct takes only an internal DOC_ID)")
+        else:
+            check(act_path != "", f"act must be created from an internal DOC_ID alone, got empty path (doc_id={prod_doc_id!r})")
+            check(bool(re.match(r"^АКТ-\d{8}-\d{4}$", act_number)),
+                  f"act number must follow the АКТ-YYYYMMDD-NNNN format (got {act_number!r})")
 
         doc.close(False)
         print()

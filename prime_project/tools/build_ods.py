@@ -108,8 +108,19 @@ NEW_SHEET_BUTTONS = {
         ("Провести выбранное", "Standard.PRIME_15_Transfers.PRIME_Transfers_ConductSelectedButton"),
         ("Провести все", "Standard.PRIME_15_Transfers.PRIME_Transfers_ConductAllButton"),
     ],
+    # journal.actions (FINAL mega-task): "Обновить, Открыть документ, Создать/открыть акт,
+    # Сделать корректировку" - только "Обновить" существовал раньше. "Открыть документ" и
+    # "Сделать корректировку" переиспользуют уже существующую диагностику/корректировку (см.
+    # PRIME_13_Diagnostics) - открыть исходный документ по DOC_ID и запустить пересчёт
+    # несоответствий соответственно; акт создаётся/открывается той же парой макросов, что и на
+    # рабочих листах (PRIME_10_ActsReports), с вводом DOC_ID по InputBox - Журнал уже показывает
+    # DOC_ID каждой строки, так что этого достаточно, без отдельного UI для выбора строки.
     "Журнал": [
         ("Обновить", "Standard.PRIME_16_Journal.PRIME_Journal_RefreshButton"),
+        ("Открыть документ", "Standard.PRIME_13_Diagnostics.PRIME_Diagnostics_OpenDocByIdButton"),
+        ("Создать акт", "Standard.PRIME_10_ActsReports.PRIME_Acts_CreateFromDocButton"),
+        ("Открыть акт", "Standard.PRIME_10_ActsReports.PRIME_Acts_OpenByDocIdButton"),
+        ("Сделать корректировку", "Standard.PRIME_12_UI.PRIME_Nav_Inventory"),
     ],
     "Комплекты": [
         ("Добавить комплект в выдачу", "Standard.PRIME_11_Kits.PRIME_Kits_AddToIssuesButton"),

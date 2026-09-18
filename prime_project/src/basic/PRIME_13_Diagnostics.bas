@@ -13,6 +13,37 @@ Public Sub PRIME_Diagnostics_RunButton()
     MsgBox report
 End Sub
 
+' journal.actions "Открыть документ" (FINAL mega-task) - по DOC_ID из "Журнал" переходит на лист-
+' источник этого документа (SOURCE_SHEET из DB_PRIME_DOCUMENTS), т.к. сами документы не имеют
+' отдельного "просмотра" - они всегда были строкой(ами) на исходном рабочем листе. Read-only
+' навигация, ничего не пишет (см. модуль-шапку).
+Public Sub PRIME_Diagnostics_OpenDocByIdButton()
+    Dim docId As String
+    docId = InputBox("DOC_ID документа для перехода:", "Открыть документ")
+    docId = Trim(docId)
+    If docId = "" Then Exit Sub
+    If Not PRIME_SheetExists(SH_DB_DOCUMENTS) Then Exit Sub
+
+    Dim docHeaders As Variant
+    docHeaders = PRIME_HeaderMap(SH_DB_DOCUMENTS)
+    Dim docTable As Variant
+    docTable = PRIME_ReadTable(SH_DB_DOCUMENTS)
+    Dim idx As Long
+    idx = PRIME_FindRowByKey(docTable, PRIME_ColIndex(docHeaders, "DOC_ID"), docId)
+    If idx = -1 Then
+        MsgBox "Документ " & docId & " не найден в журнале."
+        Exit Sub
+    End If
+
+    Dim sourceSheet As String
+    sourceSheet = CStr(docTable(idx)(PRIME_ColIndex(docHeaders, "SOURCE_SHEET")))
+    If sourceSheet = "" Or Not PRIME_SheetExists(sourceSheet) Then
+        MsgBox "У документа " & docId & " не определён исходный лист."
+        Exit Sub
+    End If
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(sourceSheet))
+End Sub
+
 ' 2.1.2: вынесено из PRIME_Diagnostics_RunButton, чтобы "Главная" могла получить только число
 ' проблем для статус-индикатора ("PRIME OK" / "есть ошибка диагностики"), не показывая MsgBox и
 ' не завися от листа "Диагностика PRIME" (он скрыт по умолчанию с 2.1.2, но сами проверки -

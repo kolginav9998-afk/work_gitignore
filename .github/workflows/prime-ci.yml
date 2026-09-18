@@ -36,7 +36,7 @@ jobs:
       - name: Install LibreOffice Calc + Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+          sudo apt-get install -y libreoffice-calc libreoffice-writer xvfb python3-uno
       # No actions/setup-python here: it would put its own interpreter ahead of the
       # system python3 in PATH, and python3-uno (installed above) only registers against
       # the system python3 - `import uno` fails under a setup-python interpreter.
@@ -65,7 +65,7 @@ jobs:
       - name: Install LibreOffice Calc + Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+          sudo apt-get install -y libreoffice-calc libreoffice-writer xvfb python3-uno
       # No actions/setup-python here - see note in prime-build (python3-uno needs the
       # system python3, not a setup-python-managed interpreter).
       - uses: actions/download-artifact@v4
@@ -107,7 +107,7 @@ jobs:
       - name: Install LibreOffice Calc + Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+          sudo apt-get install -y libreoffice-calc libreoffice-writer xvfb python3-uno
       # No actions/setup-python here - see note in prime-build.
       - uses: actions/download-artifact@v4
         with:

@@ -40,6 +40,13 @@ Public Sub PRIME_Nav_Search()
     ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_SEARCH))
 End Sub
 
+' journal.actions "Сделать корректировку" (FINAL mega-task) - переходит на "Инвентаризация", где
+' и выполняется сама корректировка (Загрузить остаток/Пересчитать/Провести) - см.
+' PRIME_08_ReturnsInventory.
+Public Sub PRIME_Nav_Inventory()
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_INVENTORY))
+End Sub
+
 Public Sub PRIME_UI_RestoreInterfaceButton()
     PRIME_UI_RestoreInterfaceSilent()
     MsgBox "Интерфейс PRIME восстановлен."
