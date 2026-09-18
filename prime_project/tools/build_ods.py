@@ -69,6 +69,7 @@ PRIME_MODULES = [
     "PRIME_14_MigrationInstaller",
     "PRIME_15_Transfers",
     "PRIME_16_Journal",
+    "PRIME_17_Home",
 ]
 
 # 2.1.0 (R25/R26): "Перемещения"/"Журнал" - совершенно новые листы без единого пре-существующего
@@ -80,6 +81,21 @@ PRIME_MODULES = [
 # push-button контролы поверх декоративной шапки листа (строка 1, под заголовком/описанием) и
 # сразу привязываются к соответствующему PRIME-макросу - см. create_new_sheet_buttons().
 NEW_SHEET_BUTTONS = {
+    "Главная": [
+        ("Обновить", "Standard.PRIME_17_Home.PRIME_Home_RefreshButton"),
+        ("Заказы", "Standard.PRIME_17_Home.PRIME_Home_GoOrders"),
+        ("Приход — Офис", "Standard.PRIME_17_Home.PRIME_Home_GoReceiptOffice"),
+        ("Приход — Производство", "Standard.PRIME_17_Home.PRIME_Home_GoReceiptProduction"),
+        ("Приход — Детали", "Standard.PRIME_17_Home.PRIME_Home_GoReceiptDetails"),
+        ("Выдачи", "Standard.PRIME_17_Home.PRIME_Home_GoIssues"),
+        ("Наличие", "Standard.PRIME_17_Home.PRIME_Home_GoStock"),
+        ("Возвраты", "Standard.PRIME_17_Home.PRIME_Home_GoReturns"),
+        ("Перемещения", "Standard.PRIME_17_Home.PRIME_Home_GoTransfers"),
+        ("Инвентаризация", "Standard.PRIME_17_Home.PRIME_Home_GoInventory"),
+        ("Поиск", "Standard.PRIME_17_Home.PRIME_Home_GoSearch"),
+        ("Журнал", "Standard.PRIME_17_Home.PRIME_Home_GoJournal"),
+        ("Комплекты", "Standard.PRIME_17_Home.PRIME_Home_GoKits"),
+    ],
     "Перемещения": [
         ("Новое перемещение", "Standard.PRIME_15_Transfers.PRIME_Transfers_NewButton"),
         ("Провести выбранное", "Standard.PRIME_15_Transfers.PRIME_Transfers_ConductSelectedButton"),
@@ -102,6 +118,8 @@ SHEET_EVENT_HANDLERS = {
     "Расход — Цех": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Приход — Офис": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Расход — Офис": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
+    "Приход — Производство": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
+    "Приход — Детали": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Возвраты": "Standard.PRIME_08_ReturnsInventory.PRIME_OnContentChanged_Returns",
     "Перемещения": "Standard.PRIME_15_Transfers.PRIME_OnContentChanged_Transfers",
 }
@@ -225,11 +243,19 @@ BUTTON_MAP = {
     ("Остаток — Заказы", "WMS_OXS_1"): "Standard.PRIME_09_StockSearch.PRIME_StockOrders_RefreshButton",
 }
 
-# Активные workflow-листы получают единый обработчик; легаси-архивные (Производство/Детали)
-# получают явный "архив истории" стаб на каждой кнопке (см. комментарий у HIDE выше - это
-# осознанное read-only поведение защищённого архивного листа, а не незакрытый долг).
-ACTIVE_WORKFLOW_SHEETS = ["Приход — Цех", "Расход — Цех", "Приход — Офис", "Расход — Офис"]
-LEGACY_WORKFLOW_SHEETS = ["Приход — Производство", "Расход — Производство", "Приход — Детали", "Расход — Детали"]
+# Активные workflow-листы получают единый обработчик. 2.1.2 (авторитетный список видимых листов
+# master task): "Приход — Производство"/"Приход — Детали" перестают быть архивом истории и
+# становятся активными receipt-листами (собственный EI_CODE на строку, контур PRODUCTION/
+# WORKSHOP_DETAILS - см. PRIME_00_Config.PRIME_ContourForSheet) - их кнопки получают реальные
+# PRIME-макросы, как у Приход — Офис. "Расход — Производство"/"Расход — Детали" активного
+# двойника не получают (нет в авторитетном списке) - получают явный "архив истории" стаб на
+# каждой кнопке (см. комментарий у HIDE выше - это осознанное read-only поведение защищённого
+# архивного листа, а не незакрытый долг).
+ACTIVE_WORKFLOW_SHEETS = [
+    "Приход — Цех", "Расход — Цех", "Приход — Офис", "Расход — Офис",
+    "Приход — Производство", "Приход — Детали",
+]
+LEGACY_WORKFLOW_SHEETS = ["Расход — Производство", "Расход — Детали"]
 WORKFLOW_BUTTON_NAMES = {
     "WMS_WF_ROW": "Standard.PRIME_07_Workflows.PRIME_Workflow_ConductRowButton",
     "WMS_WF_ALL": "Standard.PRIME_07_Workflows.PRIME_Workflow_ConductAllButton",
@@ -428,6 +454,14 @@ def rebind_buttons(doc):
         print(f"  NOTE: {mapped_actions - rebound + mapped_hides - removed} mapped (sheet, control) pairs were not found in the template")
 
 
+# 2.1.2: "Главная" needs a real button GRID (13 nav/refresh buttons - a single row would run off
+# the screen), unlike the 1-3 buttons on Перемещения/Журнал/Комплекты (single row is fine there).
+# Keyed by sheet name; sheets not listed here keep the original single-row layout (cols=None).
+NEW_SHEET_BUTTON_COLS = {
+    "Главная": 4,
+}
+
+
 def create_new_sheet_buttons(doc):
     """See NEW_SHEET_BUTTONS above: draws real push-button controls on sheets that have no
     pre-existing template control to rebind (brand-new sheets, or a sheet that already existed
@@ -447,15 +481,22 @@ def create_new_sheet_buttons(doc):
         else:
             form = forms.getByIndex(0)
 
-        # Row 0, one button per ~35mm of width (1 mm = 100 1/100mm units), 8mm tall, just under
-        # the top of the sheet - same decorative-header row every business sheet already uses
-        # for its title/description band, so this does not collide with the real data header.
-        x_cursor = 200  # 2mm left margin
+        # One button per ~35mm of width (1 mm = 100 1/100mm units), 8mm tall, just under the top
+        # of the sheet - same decorative-header row every business sheet already uses for its
+        # title/description band, so this does not collide with the real data header. Sheets in
+        # NEW_SHEET_BUTTON_COLS wrap to a new row after that many buttons instead of one long row.
+        cols_per_row = NEW_SHEET_BUTTON_COLS.get(sheet_name)
+        x_margin = 200   # 2mm left margin
         y_pos = 100      # 1mm from top
         width = 3500     # 35mm
         height = 800     # 8mm
         gap = 200        # 2mm
+        x_cursor = x_margin
         for idx, (caption, macro) in enumerate(buttons):
+            if cols_per_row and idx > 0 and idx % cols_per_row == 0:
+                x_cursor = x_margin
+                y_pos += height + gap
+
             ctrl_name = f"PRIME_BTN_{sheet_name}_{idx}"
             model = doc.createInstance("com.sun.star.form.component.CommandButton")
             model.Name = ctrl_name

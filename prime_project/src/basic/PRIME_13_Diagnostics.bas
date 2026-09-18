@@ -6,10 +6,21 @@ Option Explicit
 ' эта функция никогда не пишет ни в один системный лист и не вызывает ThisComponent.store().
 
 Public Sub PRIME_Diagnostics_RunButton()
+    Dim problems As Long
+    Dim report As String
+    report = PRIME_Diagnostics_BuildReport(problems)
+    PRIME_Diagnostics_WriteToSheet(report)
+    MsgBox report
+End Sub
+
+' 2.1.2: вынесено из PRIME_Diagnostics_RunButton, чтобы "Главная" могла получить только число
+' проблем для статус-индикатора ("PRIME OK" / "есть ошибка диагностики"), не показывая MsgBox и
+' не завися от листа "Диагностика PRIME" (он скрыт по умолчанию с 2.1.2, но сами проверки -
+' read-only и не требуют, чтобы лист был виден - см. модуль-шапку выше: store_allowed=false).
+Public Function PRIME_Diagnostics_BuildReport(ByRef problems As Long) As String
     Dim report As String
     report = "ДИАГНОСТИКА PRIME " & Format(Now, "YYYY-MM-DD HH:MM:SS") & Chr(10) & Chr(10)
 
-    Dim problems As Long
     problems = 0
 
     report = report & PRIME_Check_DuplicateProductCodes(problems)
@@ -28,10 +39,15 @@ Public Sub PRIME_Diagnostics_RunButton()
     report = report & PRIME_Check_DuplicateCommittedSourceKey(problems)
 
     report = report & Chr(10) & "ИТОГО проблем: " & problems
+    PRIME_Diagnostics_BuildReport = report
+End Function
 
-    PRIME_Diagnostics_WriteToSheet(report)
-    MsgBox report
-End Sub
+Public Function PRIME_Diagnostics_ProblemCount() As Long
+    Dim problems As Long
+    Dim discard As String
+    discard = PRIME_Diagnostics_BuildReport(problems)
+    PRIME_Diagnostics_ProblemCount = problems
+End Function
 
 Private Sub PRIME_Diagnostics_WriteToSheet(ByVal report As String)
     On Error Resume Next ' диагностика не должна упасть, если лист недоступен - но и не пишет в DB_PRIME_*

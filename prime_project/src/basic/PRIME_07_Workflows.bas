@@ -36,13 +36,15 @@ End Type
 
 
 ' PRIME_07_Workflows
-' Единый механизм для 4 активных цеховых/офисных листов (Приход/Расход - Цех/Офис) -
-' один и тот же posting engine, одна и та же лёгкая логика событий. Легаси-формы
-' "Производство"/"Детали" сюда не входят: они архив истории, не активные формы ввода
+' Единый механизм для активных receipt/issue-листов (Приход/Расход - Цех/Офис, +Приход -
+' Производство/Детали с 2.1.2) - один и тот же posting engine, одна и та же лёгкая логика
+' событий. "Расход — Производство/Детали" сюда НЕ входят: активного двойника не получают (нет
+' в авторитетном списке видимых листов master task 2.1.2), остаются архивом истории
 ' (ARCHITECTURE §5, legacy_parallel_forms).
 
 Private Function PRIME_Workflow_IsReceiptSheet(ByVal sheetName As String) As Boolean
-    PRIME_Workflow_IsReceiptSheet = (sheetName = SH_RECEIPT_SHOP Or sheetName = SH_RECEIPT_OFFICE)
+    PRIME_Workflow_IsReceiptSheet = (sheetName = SH_RECEIPT_SHOP Or sheetName = SH_RECEIPT_OFFICE _
+        Or sheetName = SH_RECEIPT_PRODUCTION Or sheetName = SH_RECEIPT_DETAILS)
 End Function
 
 Private Function PRIME_Workflow_IsIssueSheet(ByVal sheetName As String) As Boolean
@@ -119,10 +121,10 @@ Private Sub PRIME_Workflow_RefreshInlineStock(ByVal oSheet As Object, ByVal shee
     colQty = PRIME_ColIndex(headers, "Кол-во")
     Dim isReceipt As Boolean
     isReceipt = PRIME_Workflow_IsReceiptSheet(sheetName)
-    If sheetName = SH_RECEIPT_OFFICE Then
+    If sheetName = SH_RECEIPT_OFFICE Or sheetName = SH_ISSUE_OFFICE Then
         colBefore = PRIME_ColIndex(headers, "Остаток офиса") : colAfter = PRIME_ColIndex(headers, "Будет в офисе")
-    ElseIf sheetName = SH_ISSUE_OFFICE Then
-        colBefore = PRIME_ColIndex(headers, "Остаток офиса") : colAfter = PRIME_ColIndex(headers, "Будет в офисе")
+    ElseIf sheetName = SH_RECEIPT_PRODUCTION Then
+        colBefore = PRIME_ColIndex(headers, "Остаток производства") : colAfter = PRIME_ColIndex(headers, "Будет в производстве")
     Else
         colBefore = PRIME_ColIndex(headers, "Остаток деталей") : colAfter = PRIME_ColIndex(headers, "Будет деталей")
     End If

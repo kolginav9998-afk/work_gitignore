@@ -5,10 +5,13 @@ Option Explicit
 ' с разными списками листов). Команда "Восстановить интерфейс PRIME" НЕ вызывается во время
 ' обычного проведения (rebuild_interface_during_normal_posting=false) - только вручную.
 
-' Легаси-архивные листы (Производство/Детали) - только история, кнопки неактивны.
+' Легаси-архивный лист ("Расход — Производство/Детали" с 2.1.2 - см. авторитетный список
+' видимых листов master task 2.1.2: у приходов на эти контуры уже есть активные листы
+' "Приход — Производство"/"Приход — Детали", у расходов активного двойника пока нет) -
+' только история, кнопки неактивны.
 Public Sub PRIME_Legacy_ArchiveStub()
     MsgBox "Этот лист - архив истории версии 1.4.1, доступен только для чтения." & Chr(10) & _
-        "Текущий ввод ведите на листах ""Приход/Расход - Цех"" или ""Приход/Расход - Офис""."
+        "Приход по этому контуру ведите на листе ""Приход — Производство"" или ""Приход — Детали""."
 End Sub
 
 ' --- Навигация (кнопки-ярлыки на Инфо/Дашборде/Отчёте, просто переключают активный лист) -----
@@ -46,6 +49,7 @@ Public Sub PRIME_UI_RestoreInterfaceSilent()
     PRIME_UI_ApplySheetVisibility()
     PRIME_UI_ApplyFreezeAndFilters()
     PRIME_UI_FixInfoPanelText()
+    PRIME_Home_RefreshButton()
 End Sub
 
 ' remove_text_references (PRIME 2.0.1): лист "Инфо" унаследован от шаблона 1.4.1 со статическим
@@ -78,28 +82,60 @@ Private Sub PRIME_UI_FixInfoPanelText()
     Next r
 End Sub
 
-Private Sub PRIME_UI_ApplySheetVisibility()
-    Dim hiddenSheets As Variant
-    hiddenSheets = Array(SH_SYS_META, SH_SYS_SEQ, SH_SYS_TX, SH_DB_PRODUCTS, SH_DB_ALIASES, SH_DB_PRODUCT_UNITS, _
-        SH_DB_DOCUMENTS, SH_DB_DOC_LINES, SH_DB_MOVEMENTS, SH_DB_LOTS, SH_DB_ALLOCATIONS, SH_DB_RETURNS, _
-        SH_DB_ORDER_SNAPSHOT, SH_DB_KITS, SH_DB_KIT_LINES, SH_DB_ACTS, SH_DB_AUDIT)
+' 2.1.2 (авторитетный список видимых листов, master task): переписано с "перечисли, что скрыть"
+' на "перечисли, что показать, скрой всё остальное" - и надёжнее (не пропустит какой-нибудь
+' унаследованный от 1.4.1 лист, о котором забыли явно написать HIDE), и буквально соответствует
+' формулировке задания "must be hidden... unless one of the exact sheets above is the active
+' replacement". Единственные пользовательские листы, которые должны остаться видимыми:
+Private Function PRIME_UI_VisibleSheetNames() As Variant
+    PRIME_UI_VisibleSheetNames = Array(SH_HOME, SH_ORDERS, SH_RECEIPT_OFFICE, SH_RECEIPT_PRODUCTION, _
+        SH_RECEIPT_DETAILS, SH_ISSUES, SH_RETURNS, SH_TRANSFERS, SH_INVENTORY, SH_STOCK, SH_SEARCH, _
+        SH_JOURNAL, SH_KITS)
+End Function
+
+Private Function PRIME_UI_IsAllowedVisible(ByVal sheetName As String, ByVal allowList As Variant) As Boolean
     Dim i As Long
-    For i = LBound(hiddenSheets) To UBound(hiddenSheets)
-        If PRIME_SheetExists(hiddenSheets(i)) Then
-            PRIME_GetSheet(hiddenSheets(i)).IsVisible = False
+    For i = LBound(allowList) To UBound(allowList)
+        If allowList(i) = sheetName Then
+            PRIME_UI_IsAllowedVisible = True
+            Exit Function
+        End If
+    Next i
+    PRIME_UI_IsAllowedVisible = False
+End Function
+
+Private Sub PRIME_UI_ApplySheetVisibility()
+    Dim allowList As Variant
+    allowList = PRIME_UI_VisibleSheetNames()
+
+    ' Calc не разрешает скрыть текущий активный лист - переключаемся на заведомо видимый ("Главная")
+    ' ДО скрытия остальных, чтобы порядок перебора листов ниже не наткнулся на активный.
+    If PRIME_SheetExists(SH_HOME) Then
+        ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(SH_HOME))
+    End If
+
+    Dim oSheets As Object
+    oSheets = ThisComponent.Sheets
+    Dim i As Long
+    For i = 0 To oSheets.Count - 1
+        Dim oSheet As Object
+        oSheet = oSheets.getByIndex(i)
+        If PRIME_UI_IsAllowedVisible(oSheet.Name, allowList) Then
+            oSheet.IsVisible = True
+        Else
+            On Error Resume Next ' активный лист сменить некому, если "Главная" ещё не создана - не падаем
+            oSheet.IsVisible = False
+            On Error Goto 0
         End If
     Next i
 
-    ' Легаси-архивные листы (Производство/Детали) - только история, скрыты если пусты
-    ' (legacy_parallel_forms: hide/read-only/redirect, а не активные формы ввода).
+    ' Легаси-архивные листы (Расход — Производство/Детали) - только история, read-only даже
+    ' если случайно вручную раскрыты (legacy_parallel_forms: hide/read-only, не активная форма).
     Dim legacySheets As Variant
-    legacySheets = Array(SH_LEGACY_RECEIPT_PROD, SH_LEGACY_ISSUE_PROD, SH_LEGACY_RECEIPT_PARTS, SH_LEGACY_ISSUE_PARTS)
+    legacySheets = Array(SH_LEGACY_ISSUE_PROD, SH_LEGACY_ISSUE_PARTS)
     For i = LBound(legacySheets) To UBound(legacySheets)
         If PRIME_SheetExists(legacySheets(i)) Then
-            Dim oLegacy As Object
-            oLegacy = PRIME_GetSheet(legacySheets(i))
-            oLegacy.IsVisible = (PRIME_FindLastRow(oLegacy) >= 1)
-            oLegacy.IsProtected = True ' read-only - не активная форма ввода
+            PRIME_GetSheet(legacySheets(i)).IsProtected = True
         End If
     Next i
 End Sub
@@ -107,7 +143,7 @@ End Sub
 Private Sub PRIME_UI_ApplyFreezeAndFilters()
     Dim dataSheets As Variant
     dataSheets = Array(SH_ORDERS, SH_ISSUES, SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, _
-        SH_ISSUE_OFFICE, SH_RETURNS, SH_INVENTORY, SH_KITS)
+        SH_ISSUE_OFFICE, SH_RECEIPT_PRODUCTION, SH_RECEIPT_DETAILS, SH_RETURNS, SH_INVENTORY, SH_KITS)
     Dim oController As Object
     oController = ThisComponent.CurrentController
 

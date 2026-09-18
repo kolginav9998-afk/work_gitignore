@@ -8,21 +8,26 @@ Option Explicit
 Public Const PRIME_SCHEMA_VERSION As String = "2.1.1"
 Public Const PRIME_BUILD_DATE As String = "2026-09-17"
 
-' --- Контуры остатка (stock_architecture, PRIME 2.1.0) ---
-' Один и тот же товар может физически лежать в трёх независимо учитываемых контурах: общий
-' склад (Заказы/Выдачи/Возвраты/Перемещения), детали цеха (Приход/Расход - Цех) и офис
-' (Приход/Расход - Офис). Контур - часть идентичности партии/движения (наравне с местом
-' хранения), а не отдельная параллельная база - FIFO/остаток обязаны фильтровать по нему.
+' --- Контуры остатка (stock_architecture, PRIME 2.1.0; +PRODUCTION в 2.1.2) ---
+' Один и тот же товар может физически лежать в независимо учитываемых контурах: общий склад
+' (Заказы/Выдачи/Возвраты/Перемещения), детали (Приход — Детали, было "Приход/Расход - Цех"),
+' офис (Приход — Офис) и производство (Приход — Производство, новый контур 2.1.2 - см.
+' авторитетный список видимых листов в master task 2.1.2). Контур - часть идентичности
+' партии/движения (наравне с местом хранения), а не отдельная параллельная база -
+' FIFO/остаток обязаны фильтровать по нему.
 Public Const SC_GENERAL As String = "GENERAL"
 Public Const SC_WORKSHOP_DETAILS As String = "WORKSHOP_DETAILS"
 Public Const SC_OFFICE As String = "OFFICE"
+Public Const SC_PRODUCTION As String = "PRODUCTION"
 
 Public Function PRIME_ContourForSheet(ByVal sheetName As String) As String
     Select Case sheetName
-        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP
+        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_DETAILS
             PRIME_ContourForSheet = SC_WORKSHOP_DETAILS
         Case SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE
             PRIME_ContourForSheet = SC_OFFICE
+        Case SH_RECEIPT_PRODUCTION
+            PRIME_ContourForSheet = SC_PRODUCTION
         Case Else
             PRIME_ContourForSheet = SC_GENERAL
     End Select
@@ -34,6 +39,8 @@ Public Function PRIME_ContourDisplayName(ByVal contour As String) As String
             PRIME_ContourDisplayName = "Детали цеха"
         Case SC_OFFICE
             PRIME_ContourDisplayName = "Офис"
+        Case SC_PRODUCTION
+            PRIME_ContourDisplayName = "Производство"
         Case Else
             PRIME_ContourDisplayName = "Склад"
     End Select
@@ -44,10 +51,12 @@ End Function
 ' консервативно трактуется как общий склад (SC_GENERAL), а не как ошибка ввода.
 Public Function PRIME_ContourFromDisplayName(ByVal displayName As String) As String
     Select Case LCase(Trim(displayName))
-        Case "детали цеха", "цех", "workshop_details"
+        Case "детали цеха", "цех", "детали", "workshop_details"
             PRIME_ContourFromDisplayName = SC_WORKSHOP_DETAILS
         Case "офис", "office"
             PRIME_ContourFromDisplayName = SC_OFFICE
+        Case "производство", "production"
+            PRIME_ContourFromDisplayName = SC_PRODUCTION
         Case Else
             PRIME_ContourFromDisplayName = SC_GENERAL
     End Select
@@ -74,6 +83,9 @@ Public Const SH_DB_AUDIT As String = "DB_PRIME_AUDIT"
 Public Const SH_DB_RETURN_ALLOCATIONS As String = "DB_PRIME_RETURN_ALLOCATIONS"
 
 ' --- Бизнес-листы (пользовательский UI, сохраняем привычные имена 1.4.1) ---
+' 2.1.2: простой landing/навигационный лист (не дашборд с техническими данными) - см.
+' PRIME_17_Home и авторитетный список видимых листов в master task 2.1.2.
+Public Const SH_HOME As String = "Главная"
 Public Const SH_ORDERS As String = "Заказы"
 Public Const SH_ISSUES As String = "Выдачи"
 ' 2.1.0: "Остаток" переименован в "Наличие" (stock_architecture) - это сводный обзор, а не
@@ -101,10 +113,19 @@ Public Const SH_ISSUE_SHOP As String = "Расход — Цех"
 Public Const SH_RECEIPT_OFFICE As String = "Приход — Офис"
 Public Const SH_ISSUE_OFFICE As String = "Расход — Офис"
 
+' 2.1.2 (авторитетный список видимых листов master task): "Приход — Производство"/
+' "Приход — Детали" перестают быть архивом истории 1.4.1 и становятся ТРЕТЬИМ/ЧЕТВЁРТЫМ
+' активным receipt-workflow листом (см. PRIME_07_Workflows) - отдельная PRODUCTION-контур для
+' Производства, WORKSHOP_DETAILS (та же, что раньше была за "Приход — Цех") для Деталей. Каждая
+' строка прихода на любом из них получает свой уникальный EI_CODE, без агрегации по имени -
+' тот же engine/те же гарантии, что и у "Приход — Офис". "Расход — Производство"/
+' "Расход — Детали" активного двойника не получают (в авторитетном списке нет "Расход —
+' Производство/Детали") - остаются архивом истории (см. SH_LEGACY_ISSUE_PROD/PARTS ниже).
+Public Const SH_RECEIPT_PRODUCTION As String = "Приход — Производство"
+Public Const SH_RECEIPT_DETAILS As String = "Приход — Детали"
+
 ' Легаси-формы 1.4.1 - только как архив истории, не активные формы ввода (см. ARCHITECTURE §5)
-Public Const SH_LEGACY_RECEIPT_PROD As String = "Приход — Производство"
 Public Const SH_LEGACY_ISSUE_PROD As String = "Расход — Производство"
-Public Const SH_LEGACY_RECEIPT_PARTS As String = "Приход — Детали"
 Public Const SH_LEGACY_ISSUE_PARTS As String = "Расход — Детали"
 
 ' --- Реестр схемы форм (header_schema_registry, PRIME 2.0.1) ---------------------------------
@@ -121,7 +142,8 @@ Public Const SH_LEGACY_ISSUE_PARTS As String = "Расход — Детали"
 ' этой функции данные не переносит.
 Public Function PRIME_FormSchemaHeaderRow(ByVal sheetName As String) As Long
     Select Case sheetName
-        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, SH_RETURNS, SH_INVENTORY, SH_STOCK_ORDERS
+        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, SH_RECEIPT_PRODUCTION, SH_RECEIPT_DETAILS, _
+             SH_RETURNS, SH_INVENTORY, SH_STOCK_ORDERS
             PRIME_FormSchemaHeaderRow = 4
         Case SH_STOCK, SH_SEARCH
             PRIME_FormSchemaHeaderRow = 5
@@ -380,6 +402,9 @@ Public Function PRIME_WorkflowReceiptColumns(ByVal sheetName As String) As Varia
     If sheetName = SH_RECEIPT_OFFICE Then
         beforeLabel = "Остаток офиса"
         afterLabel = "Будет в офисе"
+    ElseIf sheetName = SH_RECEIPT_PRODUCTION Then
+        beforeLabel = "Остаток производства"
+        afterLabel = "Будет в производстве"
     Else
         beforeLabel = "Остаток деталей"
         afterLabel = "Будет деталей"

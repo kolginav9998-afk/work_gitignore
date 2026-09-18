@@ -234,6 +234,8 @@ Public Sub PRIME_Install_EnsureAllBusinessSheetsOnly()
     PRIME_Install_EnsureBusinessSheet(SH_ISSUE_SHOP, PRIME_WorkflowIssueColumns(SH_ISSUE_SHOP), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_OFFICE, PRIME_WorkflowReceiptColumns(SH_RECEIPT_OFFICE), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_ISSUE_OFFICE, PRIME_WorkflowIssueColumns(SH_ISSUE_OFFICE), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_PRODUCTION, PRIME_WorkflowReceiptColumns(SH_RECEIPT_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_DETAILS, PRIME_WorkflowReceiptColumns(SH_RECEIPT_DETAILS), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RETURNS, PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_INVENTORY, PRIME_InventoryColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_KITS, PRIME_KitsColumns(), Array())
@@ -246,6 +248,7 @@ Public Sub PRIME_Install_EnsureAllBusinessSheetsOnly()
     PRIME_Install_EnsureBusinessSheet(SH_DASHBOARD, Array("Показатель", "Значение"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_REPORT_INPUT, Array("Показатель", "Значение"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_REPORT_FINAL, Array("Отчёт"), Array())
+    PRIME_Home_EnsureSheet()
     PRIME_Migration_HideLegacyFormSheets()
 End Sub
 
@@ -281,8 +284,10 @@ End Sub
 ' скрываем лист, не стираем данные, в отличие от полного удаления легаси Basic-модулей
 ' (см. tools/build_ods.py.remove_legacy_modules, это другой, уже решённый вопрос).
 Public Sub PRIME_Migration_HideLegacyFormSheets()
+    ' 2.1.2: "Приход — Производство/Детали" ушли из этого списка - они больше не архив, а
+    ' активные receipt-листы (см. SH_RECEIPT_PRODUCTION/SH_RECEIPT_DETAILS в PRIME_00_Config).
     Dim legacySheets As Variant
-    legacySheets = Array(SH_LEGACY_RECEIPT_PROD, SH_LEGACY_ISSUE_PROD, SH_LEGACY_RECEIPT_PARTS, SH_LEGACY_ISSUE_PARTS)
+    legacySheets = Array(SH_LEGACY_ISSUE_PROD, SH_LEGACY_ISSUE_PARTS)
     Dim i As Long
     For i = LBound(legacySheets) To UBound(legacySheets)
         If PRIME_SheetExists(legacySheets(i)) Then
@@ -489,6 +494,8 @@ Public Sub PRIME_Migration_MigrateAllBusinessSheets()
     PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_SHOP, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_SHOP), PRIME_WorkflowHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_OFFICE), PRIME_WorkflowHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_OFFICE), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_PRODUCTION, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_DETAILS, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_DETAILS), PRIME_WorkflowHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_RETURNS, PRIME_ArrayConcat(PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_INVENTORY, PRIME_InventoryColumns()
     PRIME_Migration_MigrateBusinessSheetColumns SH_STOCK, PRIME_StockColumns()
@@ -536,6 +543,8 @@ Public Sub PRIME_Build_MigrateSilent()
         PRIME_Migration_RemapCodes(SH_ISSUE_SHOP, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_OFFICE, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_DETAILS, "Внутренний код", oldCodes, newCodes)
     End If
     PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)
     PRIME_MetaSet("MIGRATED_AT", Format(Now, "YYYY-MM-DD HH:MM:SS"))
@@ -572,6 +581,8 @@ Public Sub PRIME_Migration_RunButton()
         PRIME_Migration_RemapCodes(SH_ISSUE_SHOP, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_OFFICE, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_DETAILS, "Внутренний код", oldCodes, newCodes)
     End If
 
     PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)

@@ -48,8 +48,24 @@ Public Sub PRIME_Journal_RefreshButton()
         colRecipient = PRIME_ColIndex(lineHeaders, "RECIPIENT")
     End If
 
-    Dim outRows() As Variant
-    ReDim outRows(200)
+    ' headless_buffered_array_readback_corruption (2.1.2, см. PRIME_04_Posting.PRIME_PostIssueLines) -
+    ' раньше строки накапливались в outRows()-буфер (Dim row() внутри цикла, растущий ReDim Preserve)
+    ' и передавались одним PRIME_AppendRowsBatch; фикс - писать каждую строку сразу поячейково
+    ' внутри цикла, без буферизации.
+    Dim colOutDocId As Long, colOutOpId As Long, colOutType As Long, colOutDate As Long, colOutStatus As Long
+    Dim colOutSource As Long, colOutContour As Long, colOutRecipient As Long, colOutLineCount As Long
+    colOutDocId = PRIME_ColIndex(headers, "DOC_ID")
+    colOutOpId = PRIME_ColIndex(headers, "OP_ID")
+    colOutType = PRIME_ColIndex(headers, "Тип")
+    colOutDate = PRIME_ColIndex(headers, "Дата/время")
+    colOutStatus = PRIME_ColIndex(headers, "Статус")
+    colOutSource = PRIME_ColIndex(headers, "Источник")
+    colOutContour = PRIME_ColIndex(headers, "Контур")
+    colOutRecipient = PRIME_ColIndex(headers, "Поставщик/Получатель")
+    colOutLineCount = PRIME_ColIndex(headers, "Количество строк")
+
+    Dim outRow As Long
+    outRow = PRIME_FormSchemaFirstDataRow(SH_JOURNAL)
     Dim n As Long
     n = 0
 
@@ -89,25 +105,18 @@ Public Sub PRIME_Journal_RefreshButton()
                 Next j
             End If
 
-            Dim row(UBound(headers)) As Variant
-            row(PRIME_ColIndex(headers, "DOC_ID")) = docId
-            row(PRIME_ColIndex(headers, "OP_ID")) = opId
-            row(PRIME_ColIndex(headers, "Тип")) = CStr(docTable(i)(colDocType))
-            row(PRIME_ColIndex(headers, "Дата/время")) = IIf(committedAt <> "", committedAt, CStr(docTable(i)(colDocDate)))
-            row(PRIME_ColIndex(headers, "Статус")) = "COMMITTED"
-            row(PRIME_ColIndex(headers, "Источник")) = sourceSheet
-            row(PRIME_ColIndex(headers, "Контур")) = PRIME_ContourDisplayName(PRIME_ContourForSheet(sourceSheet))
-            row(PRIME_ColIndex(headers, "Поставщик/Получатель")) = recipient
-            row(PRIME_ColIndex(headers, "Количество строк")) = lineCount
-            If n > UBound(outRows) Then ReDim Preserve outRows(UBound(outRows) + 200)
-            outRows(n) = row
+            oSheet.getCellByPosition(colOutDocId, outRow).setString(docId)
+            oSheet.getCellByPosition(colOutOpId, outRow).setString(opId)
+            oSheet.getCellByPosition(colOutType, outRow).setString(CStr(docTable(i)(colDocType)))
+            oSheet.getCellByPosition(colOutDate, outRow).setString(IIf(committedAt <> "", committedAt, CStr(docTable(i)(colDocDate))))
+            oSheet.getCellByPosition(colOutStatus, outRow).setString("COMMITTED")
+            oSheet.getCellByPosition(colOutSource, outRow).setString(sourceSheet)
+            oSheet.getCellByPosition(colOutContour, outRow).setString(PRIME_ContourDisplayName(PRIME_ContourForSheet(sourceSheet)))
+            oSheet.getCellByPosition(colOutRecipient, outRow).setString(recipient)
+            oSheet.getCellByPosition(colOutLineCount, outRow).setValue(lineCount)
+            outRow = outRow + 1
             n = n + 1
 ContinueDoc:
         Next i
-    End If
-
-    If n > 0 Then
-        ReDim Preserve outRows(n - 1)
-        PRIME_AppendRowsBatch(SH_JOURNAL, outRows)
     End If
 End Sub
