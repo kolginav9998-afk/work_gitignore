@@ -420,6 +420,61 @@ def test_order_status_respects_manual_cancellation():
           "a manually cancelled order must never be overwritten by the automatic recompute")
 
 
+# --- control_validation (FINAL mega-task): "Контроль" was inherited from 1.4.1 but nothing ever
+# wrote to it - mirrors PRIME_05_Orders.PRIME_Orders_RunControlValidation ------------------------
+def compute_order_control(ordered, fact, price, amount):
+    """Returns (control_message, auto_computed_amount_or_None) mirroring the StarBasic function:
+    first CRITICAL check to fail wins; a fully valid row auto-calculates a missing amount and
+    reports "OK"."""
+    if ordered is not None and ordered < 0:
+        return f'ОШИБКА: некорректное количество ("{ordered}").', None
+    if fact is not None and fact < 0:
+        return f'ОШИБКА: некорректное факт. количество ("{fact}").', None
+    if ordered is not None and fact is not None and fact > ordered + 1e-6:
+        return f"ОШИБКА: факт. количество ({fact}) больше заказанного ({ordered}).", None
+    auto_amount = None
+    if price is not None and ordered is not None:
+        computed = price * ordered
+        if amount is None:
+            auto_amount = computed
+        elif abs(amount - computed) > 0.005:
+            return (f"ОШИБКА: Цена ({price}) x Количество ({ordered}) = {computed:g}, "
+                    f"а указана Сумма = {amount}."), None
+    return "OK", auto_amount
+
+
+def test_control_validation_catches_fact_exceeding_ordered():
+    msg, _ = compute_order_control(ordered=10, fact=15, price=None, amount=None)
+    check(msg.startswith("ОШИБКА") and "15" in msg and "10" in msg,
+          f"Факт>заказано must be a CRITICAL, specific error, got {msg!r}")
+
+
+def test_control_validation_catches_negative_quantity():
+    msg, _ = compute_order_control(ordered=-3, fact=None, price=None, amount=None)
+    check(msg.startswith("ОШИБКА") and "количество" in msg, f"negative ordered qty must error, got {msg!r}")
+    msg2, _ = compute_order_control(ordered=10, fact=-1, price=None, amount=None)
+    check(msg2.startswith("ОШИБКА") and "факт" in msg2, f"negative fact qty must error, got {msg2!r}")
+
+
+def test_control_validation_catches_price_times_qty_mismatch_with_specific_message():
+    msg, _ = compute_order_control(ordered=24, fact=None, price=100, amount=2000)
+    # not_generic_error: the message must name the actual numbers, not just say "ERROR".
+    check(msg.startswith("ОШИБКА") and "100" in msg and "24" in msg and "2400" in msg and "2000" in msg,
+          f"price*qty mismatch must be a specific readable message, got {msg!r}")
+
+
+def test_control_validation_auto_calculates_amount_when_only_price_filled():
+    msg, auto_amount = compute_order_control(ordered=24, fact=None, price=100, amount=None)
+    check(msg == "OK", f"a fully valid row (with auto-calc) must report OK, got {msg!r}")
+    check(auto_amount == 2400, f"Сумма must be auto-calculated as Цена x Количество, got {auto_amount!r}")
+
+
+def test_control_validation_accepts_matching_price_qty_amount():
+    msg, auto_amount = compute_order_control(ordered=24, fact=5, price=100, amount=2400)
+    check(msg == "OK", f"a correct row must report OK, not an error, got {msg!r}")
+    check(auto_amount is None, "an already-filled matching Сумма must not be recalculated")
+
+
 # === PRIME 2.1.0 regressions =================================================================
 
 # --- R01: COMMITTED OP_ID cache must update immediately on commit, not only on full rebuild ---
@@ -1152,6 +1207,11 @@ TESTS = [
     test_order_status_progression,
     test_order_status_overdue_rules,
     test_order_status_respects_manual_cancellation,
+    test_control_validation_catches_fact_exceeding_ordered,
+    test_control_validation_catches_negative_quantity,
+    test_control_validation_catches_price_times_qty_mismatch_with_specific_message,
+    test_control_validation_auto_calculates_amount_when_only_price_filled,
+    test_control_validation_accepts_matching_price_qty_amount,
     test_committed_op_id_cache_updates_immediately_after_post,
     test_fifo_is_location_scoped_but_not_contour_partitioned,
     test_multiline_document_reservation_rejects_whole_batch_when_insufficient,

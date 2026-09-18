@@ -156,10 +156,41 @@ def main():
         check(home.getCellByPosition(0, 11).getString().startswith("Версия:"), "Главная shows version")
         check(home.getCellByPosition(0, 12).getString().startswith("Статус:"), "Главная shows diagnostics status")
 
-        # === Orders child row: Receipt -> Issue -> Return live refresh ===
-        print("=== Orders child row live refresh (Issue + Return) ===")
+        # === control_validation (FINAL mega-task): "Контроль" must catch Факт>заказано, negative
+        # qty, and Цена x Количество <> Сумма mismatches, and auto-calc Сумма if only Цена is set.
+        print("=== Orders control validation ===")
         orders_sheet = doc.Sheets.getByName("Заказы")
         orders_headers = header_map(doc, "Заказы")
+        invoke_macro(doc, "PRIME_05_Orders.PRIME_Orders_NewOrder")
+        cv_row = last_row(doc, orders_sheet)
+
+        def cv_col(name):
+            return orders_headers.index(name)
+
+        orders_sheet.getCellByPosition(cv_col("Количество"), cv_row).setValue(10)
+        orders_sheet.getCellByPosition(cv_col("Факт. количество"), cv_row).setValue(15)
+        invoke_macro(doc, "PRIME_05_Orders.PRIME_Orders_RunControlValidation", (orders_sheet, orders_headers, cv_row))
+        control_msg = orders_sheet.getCellByPosition(cv_col("Контроль"), cv_row).getString()
+        check(control_msg.startswith("ОШИБКА") and "15" in control_msg and "10" in control_msg,
+              f"Контроль must catch Факт>заказано with a specific message (got {control_msg!r})")
+
+        orders_sheet.getCellByPosition(cv_col("Факт. количество"), cv_row).setValue(0)
+        orders_sheet.getCellByPosition(cv_col("Цена"), cv_row).setValue(100)
+        orders_sheet.getCellByPosition(cv_col("Сумма"), cv_row).setValue(2000)
+        invoke_macro(doc, "PRIME_05_Orders.PRIME_Orders_RunControlValidation", (orders_sheet, orders_headers, cv_row))
+        control_msg = orders_sheet.getCellByPosition(cv_col("Контроль"), cv_row).getString()
+        check(control_msg.startswith("ОШИБКА") and "2000" in control_msg and "1000" in control_msg,
+              f"Контроль must catch Цена x Количество <> Сумма with a specific message (got {control_msg!r})")
+
+        orders_sheet.getCellByPosition(cv_col("Сумма"), cv_row).setString("")
+        invoke_macro(doc, "PRIME_05_Orders.PRIME_Orders_RunControlValidation", (orders_sheet, orders_headers, cv_row))
+        control_msg = orders_sheet.getCellByPosition(cv_col("Контроль"), cv_row).getString()
+        auto_amount = orders_sheet.getCellByPosition(cv_col("Сумма"), cv_row).getValue()
+        check(control_msg == "OK", f"a corrected row must report OK, got {control_msg!r}")
+        check(auto_amount == 1000, f"Сумма must be auto-calculated as Цена x Количество (got {auto_amount})")
+
+        # === Orders child row: Receipt -> Issue -> Return live refresh ===
+        print("=== Orders child row live refresh (Issue + Return) ===")
         child_row, code1 = new_order_with_receipt(doc, orders_sheet, orders_headers, "Склад-1", 6)
         check(code1.startswith("ЕИ-"), f"receipt minted an EI_CODE ({code1!r})")
 

@@ -60,6 +60,11 @@ Public Sub PRIME_OnContentChanged_Orders(ByVal oRangeAddr As Variant)
     colOrdered = PRIME_ColIndex(headers, "Количество")
     Dim colRowType As Long
     colRowType = PRIME_ColIndex(headers, "_PRIME_RowType")
+    ' control_validation (FINAL mega-task): Факт>заказано, некорректное количество, Цена x
+    ' Количество <> Сумма, автосчёт Суммы - см. PRIME_Orders_RunControlValidation.
+    Dim colPrice As Long, colAmount As Long
+    colPrice = PRIME_ColIndex(headers, "Цена")
+    colAmount = PRIME_ColIndex(headers, "Сумма")
 
     Dim r As Long, c As Long
     For r = oRangeAddr.StartRow To oRangeAddr.EndRow
@@ -87,6 +92,9 @@ Public Sub PRIME_OnContentChanged_Orders(ByVal oRangeAddr As Variant)
                     PRIME_Orders_RecomputeStatus(oSheet, headers, r)
                 ElseIf c = colOrdered Then
                     PRIME_Orders_RecomputeStatus(oSheet, headers, r)
+                End If
+                If c = colOrdered Or c = colFact Or c = colPrice Or c = colAmount Then
+                    PRIME_Orders_RunControlValidation(oSheet, headers, r)
                 End If
             Next c
         End If
@@ -168,6 +176,84 @@ Public Sub PRIME_Orders_RecomputeStatus(ByVal oSheet As Object, ByVal headers As
     End If
 
     oSheet.getCellByPosition(colStatus, row).setString(newStatus)
+End Sub
+
+' control_validation (FINAL mega-task): "Контроль" был унаследован от 1.4.1, но НИЧЕМ не
+' заполнялся - ни одна PRIME-функция его не писала. Реализует ровно 3 явно перечисленных
+' проверки (Факт>заказано - CRITICAL, отрицательное/некорректное количество - CRITICAL, Цена x
+' Количество <> Сумма - конкретное читаемое сообщение, а не generic ERROR) плюс автосчёт Суммы,
+' если заполнена только Цена. Каждая проверка ПЕРЕЗАПИСЫВАЕТ "Контроль" при первом же найденном
+' нарушении (Exit Sub) - листовое поле, а не накопитель нескольких ошибок сразу.
+Public Sub PRIME_Orders_RunControlValidation(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+    Dim colControl As Long
+    colControl = PRIME_ColIndex(headers, "Контроль")
+    If colControl < 0 Then Exit Sub
+
+    Dim colOrdered As Long, colFact As Long, colPrice As Long, colAmount As Long
+    colOrdered = PRIME_ColIndex(headers, "Количество")
+    colFact = PRIME_ColIndex(headers, "Факт. количество")
+    colPrice = PRIME_ColIndex(headers, "Цена")
+    colAmount = PRIME_ColIndex(headers, "Сумма")
+
+    ' locale_safe_numeric_read: .getString() возвращает ТЕКСТ ячейки в формате её текущего
+    ' числового формата (например, "100,00" для дробного формата под русской локалью), а CDbl()
+    ' разбирает строку по ВЫЧИСЛИТЕЛЬНОЙ локали StarBasic, которая может не совпадать с локалью
+    ' форматирования ячейки - CDbl("100,00") в этом случае молча давал 10000 вместо 100 (запятая
+    ' воспринималась как разделитель тысяч). .getValue() отдаёт РЕАЛЬНОЕ хранимое число ячейки
+    ' независимо от локали отображения - используем getString()/IsNumeric ТОЛЬКО чтобы отличить
+    ' "поле пустое" от "поле содержит нечисловой мусор", а само значение берём через getValue().
+    Dim orderedStr As String, factStr As String, priceStr As String, amountStr As String
+    orderedStr = ""
+    If colOrdered >= 0 Then orderedStr = Trim(oSheet.getCellByPosition(colOrdered, row).getString())
+    factStr = ""
+    If colFact >= 0 Then factStr = Trim(oSheet.getCellByPosition(colFact, row).getString())
+    priceStr = ""
+    If colPrice >= 0 Then priceStr = Trim(oSheet.getCellByPosition(colPrice, row).getString())
+    amountStr = ""
+    If colAmount >= 0 Then amountStr = Trim(oSheet.getCellByPosition(colAmount, row).getString())
+
+    Dim orderedVal As Double, factVal As Double, priceVal As Double, amountVal As Double
+    If colOrdered >= 0 Then orderedVal = oSheet.getCellByPosition(colOrdered, row).getValue()
+    If colFact >= 0 Then factVal = oSheet.getCellByPosition(colFact, row).getValue()
+    If colPrice >= 0 Then priceVal = oSheet.getCellByPosition(colPrice, row).getValue()
+    If colAmount >= 0 Then amountVal = oSheet.getCellByPosition(colAmount, row).getValue()
+
+    ' CRITICAL: некорректное/отрицательное количество (заказано или факт).
+    If orderedStr <> "" And (Not IsNumeric(orderedStr) Or orderedVal < 0) Then
+        oSheet.getCellByPosition(colControl, row).setString("ОШИБКА: некорректное количество (""" & orderedStr & """).")
+        Exit Sub
+    End If
+    If factStr <> "" And (Not IsNumeric(factStr) Or factVal < 0) Then
+        oSheet.getCellByPosition(colControl, row).setString("ОШИБКА: некорректное факт. количество (""" & factStr & """).")
+        Exit Sub
+    End If
+
+    ' CRITICAL: Факт. количество не может превышать заказанное.
+    If orderedStr <> "" And IsNumeric(orderedStr) And factStr <> "" And IsNumeric(factStr) Then
+        If factVal > orderedVal + 0.0000005 Then
+            oSheet.getCellByPosition(colControl, row).setString( _
+                "ОШИБКА: факт. количество (" & factStr & ") больше заказанного (" & orderedStr & ").")
+            Exit Sub
+        End If
+    End If
+
+    ' Цена x Количество <> Сумма: автосчёт, если Сумма ещё не введена, иначе конкретная ошибка.
+    If priceStr <> "" And IsNumeric(priceStr) And orderedStr <> "" And IsNumeric(orderedStr) Then
+        Dim computed As Double
+        computed = priceVal * orderedVal
+        If amountStr = "" Then
+            If colAmount >= 0 Then oSheet.getCellByPosition(colAmount, row).setValue(computed)
+        ElseIf IsNumeric(amountStr) Then
+            If Abs(amountVal - computed) > 0.005 Then
+                oSheet.getCellByPosition(colControl, row).setString( _
+                    "ОШИБКА: Цена (" & priceStr & ") x Количество (" & orderedStr & ") = " & Format(computed, "0.##") & _
+                    ", а указана Сумма = " & amountStr & ".")
+                Exit Sub
+            End If
+        End If
+    End If
+
+    oSheet.getCellByPosition(colControl, row).setString("OK")
 End Sub
 
 ' Ввод внутреннего кода - точечный lookup по memory index, без сканирования всего листа
@@ -462,9 +548,11 @@ Private Function PRIME_Orders_BuildReceiptLine(ByVal oSheet As Object, ByVal hea
     docLine.LocationTo = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место хранения"), row).getString()
     docLine.Contour = SC_GENERAL
     docLine.OrderLineId = lineId
-    On Error Resume Next
-    docLine.Price = CDbl(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Цена"), row).getString())
-    On Error Goto 0
+    ' locale_safe_numeric_read (см. PRIME_Orders_RunControlValidation): "Цена" обычно оформлена
+    ' дробным числовым форматом - CDbl(getString()) молча искажал значение при расхождении локали
+    ' форматирования ячейки и вычислительной локали StarBasic (например, "100,00" читалось как
+    ' 10000). getValue() отдаёт реальное хранимое число ячейки независимо от локали отображения.
+    docLine.Price = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Цена"), row).getValue()
     PRIME_Orders_BuildReceiptLine = True
 End Function
 
@@ -555,7 +643,7 @@ Public Sub PRIME_Orders_InsertChildReceiptRow(ByVal oSheet As Object, ByVal head
     colReturned = PRIME_ColIndex(headers, "Возвращено")
     colAvail = PRIME_ColIndex(headers, "В наличии сейчас")
 
-    If colName >= 0 Then oSheet.getCellByPosition(colName, insertAt).setString("↳ приход")
+    If colName >= 0 Then oSheet.getCellByPosition(colName, insertAt).setString("↳ Приход")
     If colCode >= 0 Then oSheet.getCellByPosition(colCode, insertAt).setString(eiCode)
     If colRecvDate >= 0 Then oSheet.getCellByPosition(colRecvDate, insertAt).setString(receiptDate)
     If colFact >= 0 Then oSheet.getCellByPosition(colFact, insertAt).setValue(qty)
