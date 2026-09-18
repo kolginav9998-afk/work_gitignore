@@ -6,7 +6,93 @@ Option Explicit
 ' disable_legacy_events_first: перед миграцией отключаем старые обработчики WMS_*.
 
 ' === Установка / EnsureSchema ===================================================================
+' 2.1.0 upgrade safety: PRIME_Install_EnsureSheetWithHeaders ТОЛЬКО пишет заголовок для НОВОГО
+' листа - существующий с 2.0.x DB_PRIME_LOTS/MOVEMENTS/DOCUMENTS/RETURNS уже физически
+' существует (со старым, более коротким набором колонок) и остаётся нетронутым. Без этой
+' функции все PRIME_ColIndex(...,"STOCK_CONTOUR"/"OP_ID"/"PARENT_LOT_ID") на реальном upgrade-
+' файле возвращали бы -1, и часть новых полей 2.1.0 молча не записывалась бы. Дописывает НОВЫЕ
+' колонки строго в КОНЕЦ существующего заголовка (никогда не переставляет/не удаляет старые -
+' все существующие индексы, на которые могли ссылаться внешние инструменты, не сдвигаются) и
+' расширяет только область заголовка - существующие строки данных не трогает (в новых ячейках
+' пусто, что корректно читается как "" / не COMMITTED / базовый контур на всех дальнейших
+' PRIME_ColIndex-путях, которые именно так трактуют отсутствие значения).
+Private Sub PRIME_Migration_AppendHiddenSchemaColumns(ByVal sheetName As String, ByVal targetColumns As Variant)
+    If Not PRIME_SheetExists(sheetName) Then Exit Sub
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(sheetName)
+    Dim lastCol As Long
+    lastCol = PRIME_FindLastCol(oSheet)
+    If lastCol < 0 Then Exit Sub
+
+    Dim existingHeaders As Variant
+    Dim headerData As Variant
+    headerData = oSheet.getCellRangeByPosition(0, 0, lastCol, 0).getDataArray()
+    Dim n As Long
+    n = lastCol + 1
+    Dim names(n - 1) As String
+    Dim i As Long
+    For i = 0 To n - 1
+        names(i) = CStr(headerData(0)(i))
+    Next i
+
+    Dim missing() As String
+    ReDim missing(UBound(targetColumns))
+    Dim missingCount As Long
+    missingCount = 0
+    Dim tc As Long
+    For tc = LBound(targetColumns) To UBound(targetColumns)
+        Dim colName As String
+        colName = CStr(targetColumns(tc))
+        Dim found As Boolean
+        found = False
+        For i = 0 To n - 1
+            If names(i) = colName Then found = True : Exit For
+        Next i
+        If Not found Then
+            missing(missingCount) = colName
+            missingCount = missingCount + 1
+        End If
+    Next tc
+
+    If missingCount = 0 Then Exit Sub
+
+    Dim newHeader(missingCount - 1) As Variant
+    For i = 0 To missingCount - 1
+        newHeader(i) = missing(i)
+    Next i
+    Dim headerRow(0) As Variant
+    headerRow(0) = newHeader
+    oSheet.getCellRangeByPosition(lastCol + 1, 0, lastCol + missingCount, 0).setDataArray(headerRow)
+    PRIME_InvalidateHeaderCache(sheetName)
+End Sub
+
+' Вызывается ДО остального EnsureSchema/миграции - дописывает новые колонки 2.1.0 во все
+' затронутые скрытые системные листы, если они уже существовали (upgrade с 2.0.x).
+Public Sub PRIME_Migration_UpgradeHiddenSchemaTo210()
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_DOCUMENTS, PRIME_DbDocumentsColumns()
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_MOVEMENTS, PRIME_DbMovementsColumns()
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_LOTS, PRIME_DbLotsColumns()
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_RETURNS, PRIME_DbReturnsColumns()
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_ORDER_SNAPSHOT, PRIME_DbOrderSnapshotColumns()
+    ' transaction_protocol (2.1.0): существующий DB_PRIME_PRODUCTS с 2.0.x не имеет OP_ID -
+    ' дописываем колонку в конец; пустое значение в старых строках корректно читается как
+    ' "легаси/миграция, видим всегда" (см. PRIME_03_Catalog.PRIME_BuildProductIndex).
+    PRIME_Migration_AppendHiddenSchemaColumns SH_DB_PRODUCTS, PRIME_DbProductsColumns()
+
+    ' orders_must_show_receipt_positions_directly (2.1.2): существующий лист "Заказы" 2.1.1 не
+    ' имеет колонок дочерних receipt-position строк ("Выдано"/"Возвращено"/"Контур") и метки
+    ' типа строки (_PRIME_RowType) - дописываем в конец (PRIME_Migration_AppendHiddenSchemaColumns
+    ' работает для любого листа по имени, не только скрытых системных - см. её реализацию).
+    ' PRIME_Migration_MigrateOrdersSheet ниже НЕ подходит для этого - она уже давно no-op для
+    ' любого файла новее 1.4.1 (проверяет только наличие _PRIME_OrderID).
+    If PRIME_SheetExists(SH_ORDERS) Then
+        PRIME_Migration_AppendHiddenSchemaColumns SH_ORDERS, PRIME_OrdersExtraColumns()
+        PRIME_Migration_AppendHiddenSchemaColumns SH_ORDERS, PRIME_OrdersHiddenColumns()
+    End If
+End Sub
+
 Public Sub PRIME_Install_EnsureSchema()
+    PRIME_Migration_UpgradeHiddenSchemaTo210()
     PRIME_Install_EnsureSheetWithHeaders(SH_SYS_META, PRIME_SysMetaColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_SYS_SEQ, PRIME_SysSeqColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_SYS_TX, PRIME_SysTxColumns())
@@ -19,6 +105,7 @@ Public Sub PRIME_Install_EnsureSchema()
     PRIME_Install_EnsureSheetWithHeaders(SH_DB_LOTS, PRIME_DbLotsColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_DB_ALLOCATIONS, PRIME_DbAllocationsColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_DB_RETURNS, PRIME_DbReturnsColumns())
+    PRIME_Install_EnsureSheetWithHeaders(SH_DB_RETURN_ALLOCATIONS, PRIME_DbReturnAllocationsColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_DB_ORDER_SNAPSHOT, PRIME_DbOrderSnapshotColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_DB_KITS, PRIME_DbKitsColumns())
     PRIME_Install_EnsureSheetWithHeaders(SH_DB_KIT_LINES, PRIME_DbKitLinesColumns())
@@ -98,31 +185,112 @@ Public Sub PRIME_Install_EnsureBusinessSheet(ByVal sheetName As String, ByVal bu
     PRIME_InvalidateHeaderCache(sheetName)
 End Sub
 
+' 2.1.0 empirically-found defect (root cause not fully understood - same undiagnosed class of
+' StarBasic/UNO quirk already documented elsewhere in this file, e.g. EnsureSchema+
+' MigrateOrdersSheet in one invoke()): calling PRIME_Install_EnsureSchema() and then, WITHIN THE
+' SAME Sub/call-stack, a PRIME_Install_EnsureBusinessSheet() for a sheet that does not yet exist
+' (insertNewByName) SILENTLY does nothing for that second structural call - no exception, no
+' sheet created - confirmed by direct bisection (see session history): calling the two as
+' genuinely separate top-level invoke() calls from the external caller always works; calling
+' them from one combined Sub (with or without a `Wait` in between) always silently drops the
+' second one. This was already true in 2.0.0/2.0.1 (that's exactly why "Комплекты" never
+' actually existed in any previously shipped .ods despite PRIME_Install_EnsureAllBusinessSheetsSilent
+' appearing to call PRIME_Install_EnsureBusinessSheet(SH_KITS, ...) - the external audit's
+' finding "Комплекты отсутствует в собранном ODS" was a real, previously undiscovered symptom of
+' this bug, not a missing feature). Fix: tools/build_ods.py now calls PRIME_Install_EnsureSchema
+' and PRIME_Install_EnsureAllBusinessSheetsOnly as two SEPARATE top-level invokes (verified to
+' reliably create every sheet). The interactive single-click wrapper below keeps the old
+' combined convenience for the UI button (a real button click is a different execution context
+' than an external headless invoke() and has not been shown to hit the same failure, but this is
+' NOT verified in this environment - see KNOWN_ISSUES) and adds a defensive retry: if a
+' representative new sheet is still missing after the first pass, it runs the business-sheet
+' install a second time (idempotent either way).
 Public Sub PRIME_Install_EnsureAllBusinessSheetsButton()
-    PRIME_Install_EnsureAllBusinessSheetsSilent()
+    PRIME_Install_EnsureSchema()
+    PRIME_Install_EnsureAllBusinessSheetsOnly()
+    If Not PRIME_SheetExists(SH_KITS) Or Not PRIME_SheetExists(SH_TRANSFERS) Then
+        PRIME_Install_EnsureAllBusinessSheetsOnly() ' defensive retry, see comment above
+    End If
     MsgBox "Все листы PRIME проверены/созданы."
 End Sub
 
 ' Вариант без MsgBox - вызывается сборщиком (tools/build_ods.py) в headless-режиме, где
-' любой диалог означал бы зависание процесса сборки.
+' любой диалог означал бы зависание процесса сборки. ВАЖНО: сборщик обязан вызвать
+' PRIME_Install_EnsureSchema() ОТДЕЛЬНЫМ top-level invoke() ДО этой функции - см. комментарий
+' выше про обнаруженный дефект связки EnsureSchema+EnsureBusinessSheet в одном вызове.
 Public Sub PRIME_Install_EnsureAllBusinessSheetsSilent()
     PRIME_Install_EnsureSchema()
+    PRIME_Install_EnsureAllBusinessSheetsOnly()
+End Sub
+
+' Только бизнес-листы, БЕЗ PRIME_Install_EnsureSchema() - см. комментарий у
+' PRIME_Install_EnsureAllBusinessSheetsButton про обязательное разделение top-level invoke().
+Public Sub PRIME_Install_EnsureAllBusinessSheetsOnly()
+    PRIME_Migration_RenameStockToNalichie()
+    PRIME_Migration_RenameSearchToPoisk()
     PRIME_Install_EnsureBusinessSheet(SH_ORDERS, PRIME_ArrayConcat(PRIME_OrdersBusinessColumns(), PRIME_OrdersExtraColumns()), PRIME_OrdersHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_ISSUES, PRIME_IssuesColumns(), PRIME_IssuesHiddenColumns())
-    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_SHOP, PRIME_WorkflowReceiptColumns(), PRIME_WorkflowHiddenColumns())
-    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_SHOP, PRIME_WorkflowIssueColumns(), PRIME_WorkflowHiddenColumns())
-    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_OFFICE, PRIME_WorkflowReceiptColumns(), PRIME_WorkflowHiddenColumns())
-    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_OFFICE, PRIME_WorkflowIssueColumns(), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_SHOP, PRIME_WorkflowReceiptColumns(SH_RECEIPT_SHOP), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_SHOP, PRIME_WorkflowIssueColumns(SH_ISSUE_SHOP), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_OFFICE, PRIME_WorkflowReceiptColumns(SH_RECEIPT_OFFICE), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_OFFICE, PRIME_WorkflowIssueColumns(SH_ISSUE_OFFICE), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_PRODUCTION, PRIME_WorkflowReceiptColumns(SH_RECEIPT_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_DETAILS, PRIME_WorkflowReceiptColumns(SH_RECEIPT_DETAILS), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_PRODUCTION, PRIME_WorkflowIssueColumns(SH_ISSUE_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_DETAILS, PRIME_WorkflowIssueColumns(SH_ISSUE_DETAILS), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RETURNS, PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_INVENTORY, PRIME_InventoryColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_KITS, PRIME_KitsColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_STOCK, PRIME_StockColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_STOCK_ORDERS, PRIME_StockOrdersColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_SEARCH, PRIME_SearchColumns(), Array())
+    PRIME_Install_EnsureBusinessSheet(SH_TRANSFERS, PRIME_TransfersColumns(), PRIME_TransfersHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_JOURNAL, PRIME_JournalColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_DIAGNOSTICS, Array("Диагностика"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_DASHBOARD, Array("Показатель", "Значение"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_REPORT_INPUT, Array("Показатель", "Значение"), Array())
     PRIME_Install_EnsureBusinessSheet(SH_REPORT_FINAL, Array("Отчёт"), Array())
+    PRIME_Home_EnsureSheet()
+    PRIME_Migration_HideLegacyFormSheets()
+End Sub
+
+' R24 (2.1.0): физически переименовывает унаследованный лист "Остаток" в "Наличие", ТОЛЬКО если
+' "Наличие" ещё не существует - без этого PRIME_Install_EnsureBusinessSheet(SH_STOCK, ...)
+' создал бы ВТОРОЙ, пустой лист "Наличие" рядом со старым "Остаток", который остался бы
+' видимым и вводящим в заблуждение (два листа "остатка" сразу).
+Public Sub PRIME_Migration_RenameStockToNalichie()
+    Dim oSheets As Object
+    oSheets = ThisComponent.Sheets
+    If oSheets.hasByName(SH_STOCK) Then Exit Sub ' уже переименован в этом или предыдущем запуске
+    If Not oSheets.hasByName(SH_STOCK_LEGACY_NAME) Then Exit Sub ' новая книга - EnsureBusinessSheet создаст сама
+    oSheets.getByName(SH_STOCK_LEGACY_NAME).Name = SH_STOCK
+    PRIME_InvalidateHeaderCache(SH_STOCK_LEGACY_NAME)
+    PRIME_InvalidateHeaderCache(SH_STOCK)
+End Sub
+
+' 2.1.2: тот же приём (см. комментарий у PRIME_Migration_RenameStockToNalichie), для
+' "База - Поиск" -> "Поиск" (короче, единообразно с остальными листами - ни у одного другого
+' пользовательского листа нет составного "База - " префикса).
+Public Sub PRIME_Migration_RenameSearchToPoisk()
+    Dim oSheets As Object
+    oSheets = ThisComponent.Sheets
+    If oSheets.hasByName(SH_SEARCH) Then Exit Sub ' уже переименован в этом или предыдущем запуске
+    If Not oSheets.hasByName(SH_SEARCH_LEGACY_NAME) Then Exit Sub ' новая книга - EnsureBusinessSheet создаст сама
+    oSheets.getByName(SH_SEARCH_LEGACY_NAME).Name = SH_SEARCH
+    PRIME_InvalidateHeaderCache(SH_SEARCH_LEGACY_NAME)
+    PRIME_InvalidateHeaderCache(SH_SEARCH)
+End Sub
+
+' R27 (2.1.0), FINAL (mega-prompt): изначально скрывала легаси-формы 1.4.1
+' "Приход/Расход — Производство/Детали" как read-only архив. Все 4 листа этой группы теперь
+' активные receipt/issue-workflow листы (см. SH_RECEIPT_PRODUCTION/SH_RECEIPT_DETAILS/
+' SH_ISSUE_PRODUCTION/SH_ISSUE_DETAILS в PRIME_00_Config) - легаси-архива этой группы больше
+' не осталось. Единственный оставшийся необновлённый лист старой формы - "Приход/Расход — Цех"
+' (SH_RECEIPT_SHOP/SH_ISSUE_SHOP) - он просто отсутствует в allow-list
+' PRIME_12_UI.PRIME_UI_VisibleSheetNames и скрывается этим механизмом, без отдельной функции.
+Public Sub PRIME_Migration_HideLegacyFormSheets()
+    ' Ничего не делает - см. комментарий выше. Оставлена как единая точка вызова в
+    ' PRIME_Install_EnsureAllBusinessSheetsOnly на случай будущей архивной группы.
 End Sub
 
 Private Function PRIME_ArrayConcat(ByVal a As Variant, ByVal b As Variant) As Variant
@@ -172,7 +340,7 @@ End Function
 Public Sub PRIME_Install_DisableLegacyEvents()
     Dim sheetNames As Variant
     sheetNames = Array(SH_ORDERS, SH_ISSUES, SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, _
-        SH_RETURNS, "Приход — Производство", "Расход — Производство", "Приход — Детали", "Расход — Детали")
+        SH_RETURNS, SH_RECEIPT_PRODUCTION, SH_ISSUE_PRODUCTION, SH_RECEIPT_DETAILS, SH_ISSUE_DETAILS)
     Dim i As Long
     For i = LBound(sheetNames) To UBound(sheetNames)
         If PRIME_SheetExists(sheetNames(i)) Then
@@ -183,6 +351,155 @@ Public Sub PRIME_Install_DisableLegacyEvents()
             On Error Goto 0
         End If
     Next i
+End Sub
+
+' === Миграция колонок бизнес-листов, унаследованных от 1.4.1 (issues_migration, PRIME 2.0.1) ===
+' Дефект 2.0.0: PRIME_Install_EnsureBusinessSheet создаёт целевую раскладку колонок ТОЛЬКО для
+' листа, которого ещё не существует - но почти все бизнес-листы (Выдачи и все 4 листа
+' Приход/Расход - Цех/Офис, Возвраты, Инвентаризация, Остаток, Остаток - Заказы, База - Поиск)
+' УЖЕ существуют в шаблоне 1.4.1 (с декоративной "шапкой" и/или легаси _WMS_*-колонками), из-за
+' чего EnsureBusinessSheet молча ничего для них не делает - все эти листы оставались на исходной
+' раскладке 1.4.1, а не на PRIME_*Columns() схеме, которую ожидает остальной код. Единственный
+' лист, для которого это было явно исправлено в 2.0.0 - "Заказы" (PRIME_Migration_MigrateOrdersSheet).
+' Эта функция - универсальная замена: приводит УЖЕ существующий лист к целевому набору колонок,
+' перенося данные ПО ИМЕНИ колонки (колонки без соответствия в целевой схеме, включая любые
+' легаси _WMS_*-поля, не переносятся - non_negotiable_architecture.legacy_code_allowed_in_production_ods=false).
+' Идемпотентна: если текущий заголовок уже точно совпадает с целевым - не трогает лист.
+Public Function PRIME_Migration_MigrateBusinessSheetColumns(ByVal sheetName As String, ByVal targetColumns As Variant) As Boolean
+    If Not PRIME_SheetExists(sheetName) Then
+        PRIME_Migration_MigrateBusinessSheetColumns = False
+        Exit Function
+    End If
+
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(sheetName)
+    Dim headerRow As Long
+    headerRow = PRIME_FormSchemaHeaderRow(sheetName)
+
+    Dim targetCount As Long
+    targetCount = UBound(targetColumns) - LBound(targetColumns) + 1
+
+    Dim lastCol As Long
+    lastCol = PRIME_FindLastCol(oSheet)
+    Dim oldHeaders() As String
+    If lastCol >= 0 Then
+        Dim headerData As Variant
+        headerData = oSheet.getCellRangeByPosition(0, headerRow, lastCol, headerRow).getDataArray()
+        ReDim oldHeaders(lastCol)
+        Dim hc As Long
+        For hc = 0 To lastCol
+            oldHeaders(hc) = CStr(headerData(0)(hc))
+        Next hc
+    Else
+        ReDim oldHeaders(-1)
+    End If
+
+    ' Уже мигрировано (точное совпадение имени и порядка колонок) - ничего не делаем, чтобы
+    ' повторный запуск сборки/миграции не тёр уже введённые пользователем данные.
+    Dim alreadyMigrated As Boolean
+    alreadyMigrated = (UBound(oldHeaders) - LBound(oldHeaders) + 1 = targetCount)
+    If alreadyMigrated Then
+        Dim tc As Long
+        For tc = 0 To targetCount - 1
+            If oldHeaders(tc) <> CStr(targetColumns(LBound(targetColumns) + tc)) Then
+                alreadyMigrated = False
+                Exit For
+            End If
+        Next tc
+    End If
+    If alreadyMigrated Then
+        PRIME_Migration_MigrateBusinessSheetColumns = False
+        Exit Function
+    End If
+
+    Dim oldLastRow As Long
+    oldLastRow = PRIME_FindLastRow(oSheet) ' по ТЕКУЩЕМУ headerRow - вызывается до перезаписи
+    Dim oldDataRowCount As Long
+    oldDataRowCount = oldLastRow - headerRow ' может быть <= 0, если данных ещё нет
+
+    Dim totalNewRows As Long
+    totalNewRows = 1 ' заголовок
+    If oldDataRowCount > 0 Then totalNewRows = totalNewRows + oldDataRowCount
+
+    Dim newTable(totalNewRows - 1) As Variant
+    Dim headerOut(targetCount - 1) As Variant
+    Dim i As Long
+    For i = 0 To targetCount - 1
+        headerOut(i) = targetColumns(LBound(targetColumns) + i)
+    Next i
+    newTable(0) = headerOut
+
+    If oldDataRowCount > 0 Then
+        Dim oldDataRange As Variant
+        oldDataRange = oSheet.getCellRangeByPosition(0, headerRow, lastCol, oldLastRow).getDataArray()
+        Dim r As Long
+        For r = 1 To oldDataRowCount
+            Dim newRow(targetCount - 1) As Variant
+            Dim c As Long
+            For c = 0 To targetCount - 1
+                Dim colName As String
+                colName = CStr(targetColumns(LBound(targetColumns) + c))
+                Dim oldIdx As Long
+                oldIdx = PRIME_Migration_IndexOfName(oldHeaders, colName)
+                If oldIdx >= 0 Then
+                    newRow(c) = oldDataRange(r)(oldIdx)
+                Else
+                    newRow(c) = ""
+                End If
+            Next c
+            newTable(r) = newRow
+        Next r
+    End If
+
+    ' Очищаем максимум старой/новой области, затем пишем целевую раскладку одним батчем.
+    Dim clearLastCol As Long
+    clearLastCol = lastCol
+    If targetCount - 1 > clearLastCol Then clearLastCol = targetCount - 1
+    Dim clearLastRow As Long
+    clearLastRow = oldLastRow
+    If headerRow + totalNewRows - 1 > clearLastRow Then clearLastRow = headerRow + totalNewRows - 1
+    If clearLastCol >= 0 And clearLastRow >= headerRow Then
+        oSheet.getCellRangeByPosition(0, headerRow, clearLastCol, clearLastRow).clearContents(1023)
+    End If
+    oSheet.getCellRangeByPosition(0, headerRow, targetCount - 1, headerRow + totalNewRows - 1).setDataArray(newTable)
+
+    PRIME_InvalidateHeaderCache(sheetName)
+    PRIME_Migration_MigrateBusinessSheetColumns = True
+End Function
+
+Private Function PRIME_Migration_IndexOfName(ByVal names() As String, ByVal target As String) As Long
+    If UBound(names) < LBound(names) Then
+        PRIME_Migration_IndexOfName = -1
+        Exit Function
+    End If
+    Dim i As Long
+    For i = LBound(names) To UBound(names)
+        If names(i) = target Then
+            PRIME_Migration_IndexOfName = i
+            Exit Function
+        End If
+    Next i
+    PRIME_Migration_IndexOfName = -1
+End Function
+
+' Вызывает миграцию колонок для КАЖДОГО бизнес-листа, для которого PRIME_Install_EnsureBusinessSheet
+' не гарантирует целевую раскладку (см. комментарий выше) - "Заказы" сюда не входит, у неё
+' отдельная, более сложная миграция (PRIME_Migration_MigrateOrdersSheet, генерирует ЕИ-коды).
+Public Sub PRIME_Migration_MigrateAllBusinessSheets()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUES, PRIME_ArrayConcat(PRIME_IssuesColumns(), PRIME_IssuesHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_SHOP, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_SHOP), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_SHOP, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_SHOP), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_OFFICE), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_OFFICE), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_PRODUCTION, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_DETAILS, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_DETAILS), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_PRODUCTION, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_DETAILS, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_DETAILS), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_RETURNS, PRIME_ArrayConcat(PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_INVENTORY, PRIME_InventoryColumns()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_STOCK, PRIME_StockColumns()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_STOCK_ORDERS, PRIME_StockOrdersColumns()
+    PRIME_Migration_MigrateBusinessSheetColumns SH_SEARCH, PRIME_SearchColumns()
 End Sub
 
 ' === Миграция 1.4.1 -> 2.0.0 =====================================================================
@@ -211,6 +528,10 @@ End Sub
 ' (через PRIME_Install_EnsureAllBusinessSheetsSilent) - см. предупреждение выше.
 Public Sub PRIME_Build_MigrateSilent()
     PRIME_Install_DisableLegacyEvents()
+    ' Приводит Выдачи/workflow-листы/Возвраты/Инвентаризацию/Остаток/Поиск к целевой раскладке
+    ' ДО миграции "Заказы" - порядок не важен для корректности (независимые листы), но так
+    ' ошибки в одной миграции не маскируют результат другой при чтении лога.
+    PRIME_Migration_MigrateAllBusinessSheets()
     Dim oldCodes() As String
     Dim newCodes() As String
     Dim mapCount As Long
@@ -221,6 +542,10 @@ Public Sub PRIME_Build_MigrateSilent()
         PRIME_Migration_RemapCodes(SH_ISSUE_SHOP, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_OFFICE, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_DETAILS, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_DETAILS, "Внутренний код", oldCodes, newCodes)
     End If
     PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)
     PRIME_MetaSet("MIGRATED_AT", Format(Now, "YYYY-MM-DD HH:MM:SS"))
@@ -229,7 +554,7 @@ End Sub
 
 Public Sub PRIME_Migration_RunButton()
     Dim answer As Integer
-    answer = MsgBox("Выполнить миграцию 1.4.1 -> PRIME 2.0.0?" & Chr(10) & _
+    answer = MsgBox("Выполнить миграцию 1.4.1 -> PRIME " & PRIME_SCHEMA_VERSION & "?" & Chr(10) & _
         "Будет создана резервная копия перед началом. Действие затрагивает структуру листа ""Заказы"".", _
         MB_YESNO + MB_ICONQUESTION, "Миграция PRIME")
     If answer <> IDYES Then Exit Sub
@@ -243,6 +568,7 @@ Public Sub PRIME_Migration_RunButton()
 
     PRIME_Install_DisableLegacyEvents()
     PRIME_Install_EnsureSchema()
+    PRIME_Migration_MigrateAllBusinessSheets()
 
     Dim renameMap As Object
     Dim oldCodes() As String
@@ -256,6 +582,10 @@ Public Sub PRIME_Migration_RunButton()
         PRIME_Migration_RemapCodes(SH_ISSUE_SHOP, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_OFFICE, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_RECEIPT_DETAILS, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_DETAILS, "Внутренний код", oldCodes, newCodes)
     End If
 
     PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)
@@ -359,6 +689,7 @@ Public Function PRIME_Migration_MigrateOrdersSheet(ByRef oldCodes() As String, B
                 oSheet.getCellByPosition(colRemaining, r).setValue(CDbl(orderedStr))
             End If
         End If
+        PRIME_Orders_RecomputeStatus(oSheet, headers2, r)
     Next r
 
     PRIME_Migration_MigrateOrdersSheet = PRIME_Migration_SeedProductsFromOrders(oldCodes, newCodes)

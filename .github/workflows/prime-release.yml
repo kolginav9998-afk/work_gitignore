@@ -18,51 +18,70 @@ jobs:
       - name: Install LibreOffice Calc + Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y libreoffice-calc xvfb python3-uno
+          sudo apt-get install -y libreoffice-calc libreoffice-writer xvfb python3-uno
       # No actions/setup-python: it would put its own interpreter ahead of the system
       # python3 in PATH, and python3-uno (installed above) only registers against the
       # system python3 - `import uno` fails under a setup-python-managed interpreter.
 
+      - name: Read PRIME_SCHEMA_VERSION
+        id: version
+        run: |
+          VERSION=$(grep -oP 'PRIME_SCHEMA_VERSION As String = "\K[^"]+' src/basic/PRIME_00_Config.bas)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ods_name=ПОКАТАК_PRIME_${VERSION}.ods" >> "$GITHUB_OUTPUT"
+
       - name: prime-static
-        run: python3 tools/static_check_source.py
+        run: python3 tools/static_check_source.py | tee /tmp/static_source.log
 
       - name: prime-build
         run: |
           mkdir -p dist
-          xvfb-run -a python3 tools/build_ods.py --output dist/ПОКАТАК_PRIME_2.0.0.ods
+          xvfb-run -a python3 tools/build_ods.py --output "dist/${{ steps.version.outputs.ods_name }}"
 
       - name: prime-ods-validate
         run: |
-          xvfb-run -a python3 tests/static_checks.py dist/ПОКАТАК_PRIME_2.0.0.ods | tee validation_report.txt
-          python3 tools/validation_report_to_json.py validation_report.txt dist/validation_report.json
+          xvfb-run -a python3 tests/static_checks.py "dist/${{ steps.version.outputs.ods_name }}" | tee /tmp/validation.log
+          python3 tools/validation_report_to_json.py /tmp/validation.log dist/validation_report.json
 
       - name: prime-tests
-        run: python3 tests/model_tests.py | tee dist/TEST_REPORT.md
+        run: python3 tests/model_tests.py | tee /tmp/model_tests.log
 
       - name: prime-libreoffice-linux-smoke
-        run: xvfb-run -a python3 tools/smoke_open_save_reopen.py dist/ПОКАТАК_PRIME_2.0.0.ods
+        run: xvfb-run -a python3 tools/smoke_open_save_reopen.py "dist/${{ steps.version.outputs.ods_name }}" | tee /tmp/smoke.log
+
+      - name: Generate TEST_REPORT.md
+        run: |
+          python3 tools/generate_test_report.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --static-source-log /tmp/static_source.log \
+            --validation-log /tmp/validation.log \
+            --model-tests-log /tmp/model_tests.log \
+            --smoke-log /tmp/smoke.log \
+            --output dist/TEST_REPORT.md
 
       - name: Generate build manifest
         run: |
           python3 tools/build_manifest.py \
-            --ods dist/ПОКАТАК_PRIME_2.0.0.ods \
+            --ods "dist/${{ steps.version.outputs.ods_name }}" \
             --output dist/build_manifest.json \
-            --test-summary dist/TEST_REPORT.md
+            --test-summary /tmp/model_tests.log
 
       - name: Copy release documentation into dist/
         run: |
           cp docs/CHANGELOG.md dist/CHANGELOG_PRIME.md
           cp docs/MIGRATION.md dist/MIGRATION_1.4.1_TO_2.0.md
+          cp docs/MIGRATION_2.0.0_TO_2.0.1.md dist/MIGRATION_2.0.0_TO_2.0.1.md
           cp НАЧАТЬ_PRIME.txt dist/НАЧАТЬ_PRIME.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: prime-release-assets
           path: |
-            prime_project/dist/ПОКАТАК_PRIME_2.0.0.ods
+            prime_project/dist/*.ods
             prime_project/dist/НАЧАТЬ_PRIME.txt
             prime_project/dist/CHANGELOG_PRIME.md
             prime_project/dist/MIGRATION_1.4.1_TO_2.0.md
+            prime_project/dist/MIGRATION_2.0.0_TO_2.0.1.md
             prime_project/dist/TEST_REPORT.md
             prime_project/dist/build_manifest.json
             prime_project/dist/validation_report.json
@@ -82,10 +101,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ПОКАТАК_PRIME_2.0.0.ods
+            dist/*.ods
             dist/НАЧАТЬ_PRIME.txt
             dist/CHANGELOG_PRIME.md
             dist/MIGRATION_1.4.1_TO_2.0.md
+            dist/MIGRATION_2.0.0_TO_2.0.1.md
             dist/TEST_REPORT.md
             dist/build_manifest.json
           generate_release_notes: true

@@ -21,17 +21,49 @@ Public Sub PRIME_BuildProductIndex()
         headers = PRIME_HeaderMap(SH_DB_PRODUCTS)
         Dim colCode As Long
         colCode = PRIME_ColIndex(headers, "PRODUCT_CODE")
+        Dim colOpId As Long
+        colOpId = PRIME_ColIndex(headers, "OP_ID")
         Dim i As Long
         For i = 1 To UBound(table)
             Dim code As String
             code = CStr(table(i)(colCode))
-            If code <> "" And Not PRIME_CollectionHasKey(gProductIndex, code) Then
-                gProductIndex.Add(table(i), code)
+            Dim visible As Boolean
+            visible = True
+            If colOpId >= 0 Then
+                Dim opId As String
+                opId = CStr(table(i)(colOpId))
+                ' Пусто = легаси/миграция/прямое создание - видим всегда. Непусто = товар создан
+                ' внутри проведения документа - видим, только если его OP_ID уже COMMITTED (иначе
+                ' это "призрачный" товар из ещё не завершённой или упавшей транзакции).
+                If opId <> "" Then visible = PRIME_IsOpIdCommitted(opId)
+            End If
+            If code <> "" And visible And Not PRIME_CollectionHasKey(gProductIndex, code) Then
+                ' headless_repeat_array_cache_read_crash (2.1.2, см. PRIME_02_Store.PRIME_HeaderMap) -
+                ' тот же класс дефекта: массив как элемент Collection падает при повторном .Item()
+                ' в одной цепочке вызовов. PRIME_Orders_AutofillByCode читает 5 разных полей ОДНОГО
+                ' и того же товара подряд (PRIME_GetProductField x5 -> PRIME_GetProduct x5) - без
+                ' этого обхода 2-5-е чтения детерминированно падали бы. Единственный потребитель
+                ' (PRIME_GetProductField) и так всегда делает CStr(rec(col)), потери типов нет.
+                gProductIndex.Add(PRIME_JoinRowAsTabString(table(i)), code)
             End If
         Next i
     End If
     gProductIndexBuilt = True
 End Sub
+
+' См. комментарий headless_repeat_array_cache_read_crash в PRIME_BuildProductIndex выше -
+' Chr(9) выбран как разделитель, потому что ни одно реальное значение колонки товара (коды,
+' наименования, категории, числа/даты как текст) не содержит символ табуляции.
+Private Function PRIME_JoinRowAsTabString(ByVal row As Variant) As String
+    Dim s As String
+    s = ""
+    Dim i As Long
+    For i = LBound(row) To UBound(row)
+        If i > LBound(row) Then s = s & Chr(9)
+        s = s & CStr(row(i))
+    Next i
+    PRIME_JoinRowAsTabString = s
+End Function
 
 Public Sub PRIME_InvalidateProductIndex()
     gProductIndexBuilt = False
@@ -52,7 +84,7 @@ Public Function PRIME_GetProduct(ByVal productCode As String) As Variant
     PRIME_EnsureProductIndex()
     Dim rec As Variant
     If PRIME_CollectionTryGet(gProductIndex, productCode, rec) Then
-        PRIME_GetProduct = rec
+        PRIME_GetProduct = Split(CStr(rec), Chr(9))
     Else
         PRIME_GetProduct = Empty
     End If
@@ -236,10 +268,15 @@ End Function
 ' --- Местоположение с положительным остатком (для автоподстановки "Откуда" в Выдачах) ---
 ' location_rule: подставить, только если положительный остаток ровно в одном месте.
 ' Возвращает "" если мест 0 или >1 (multiple_locations => оставить пустым и показать подсказку).
+' single_physical_warehouse (FINAL): раньше здесь был жёстко зашит SC_GENERAL - "Выдачи"
+' работали только с позициями, пришедшими через "Заказы", и не находили остаток по EI,
+' пришедшему через "Приход — Офис/Производство/Детали" (сам EI существовал, но автоподстановка
+' молчала "остатка нет"). Один физический склад - без фильтра по источнику вообще.
 Public Function PRIME_SingleLocationWithStock(ByVal productCode As String) As String
     Dim locations() As String
     Dim quantities() As Double
-    PRIME_StockByLocation(productCode, locations, quantities)
+    Dim contours() As String
+    PRIME_StockByLocation(productCode, "", locations, quantities, contours)
 
     Dim result As String
     result = ""
@@ -263,40 +300,59 @@ Public Function PRIME_SingleLocationWithStock(ByVal productCode As String) As St
     End If
 End Function
 
-' Остаток товара по местам хранения, посчитанный из COMMITTED-движений (DB_PRIME_MOVEMENTS).
-' Заполняет параллельные массивы locations()/quantities() - Collection в StarBasic не отдаёт
-' свои ключи обратно, поэтому агрегация ведётся через явные массивы, а не через Collection.
-Public Sub PRIME_StockByLocation(ByVal productCode As String, ByRef locations() As String, ByRef quantities() As Double)
+' Остаток товара по месту хранения, посчитанный из COMMITTED-движений (DB_PRIME_MOVEMENTS).
+' Заполняет параллельные массивы locations()/quantities()/contours() - Collection в StarBasic не
+' отдаёт свои ключи обратно, поэтому агрегация ведётся через явные массивы, а не через Collection.
+' FINAL mega-task (single_physical_warehouse): группировка была по (место, контур) - тот же класс
+' бага, что и в PRIME_09_StockSearch.PRIME_Stock_Rebuild (см. подробное объяснение там) - две
+' строки с одним и тем же местом, но разным STOCK_CONTOUR (например, обычное поступление и
+' перемещение с пустым контуром), задваивались в остатке по месту вместо суммирования в одну
+' позицию. Теперь группировка строго по месту; contourFilter оставлен в сигнатуре ради
+' совместимости вызывающих (оба текущих вызова передают "") - contours() на выходе несёт только
+' последний увиденный тег как информационный, не влияет на суммирование.
+' committed_only_stock (2.0.1): фильтр по PRIME_IsOpIdCommitted - см. комментарий у
+' PRIME_04_Posting.PRIME_LotBalance, здесь та же независимая реализация суммирования по
+' движениям, поэтому фильтр нужно было продублировать отдельно.
+Public Sub PRIME_StockByLocation(ByVal productCode As String, ByVal contourFilter As String, ByRef locations() As String, ByRef quantities() As Double, ByRef contours() As String)
     Dim locCount As Long
     locCount = 0
 
     If Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then
         ReDim locations(-1)
         ReDim quantities(-1)
+        ReDim contours(-1)
         Exit Sub
     End If
 
     Dim headers As Variant
     headers = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colProduct As Long, colLoc As Long, colQty As Long
+    Dim colProduct As Long, colLoc As Long, colQty As Long, colOpId As Long, colContour As Long
     colProduct = PRIME_ColIndex(headers, "PRODUCT_CODE")
     colLoc = PRIME_ColIndex(headers, "LOCATION")
     colQty = PRIME_ColIndex(headers, "QTY_BASE")
+    colOpId = PRIME_ColIndex(headers, "OP_ID")
+    colContour = PRIME_ColIndex(headers, "STOCK_CONTOUR")
 
     Dim table As Variant
     table = PRIME_ReadTable(SH_DB_MOVEMENTS)
     If UBound(table) < 1 Then
         ReDim locations(-1)
         ReDim quantities(-1)
+        ReDim contours(-1)
         Exit Sub
     End If
 
     ReDim locations(UBound(table))
     ReDim quantities(UBound(table))
+    ReDim contours(UBound(table))
 
     Dim i As Long, j As Long, foundIdx As Long
     For i = 1 To UBound(table)
-        If CStr(table(i)(colProduct)) = productCode Then
+        If CStr(table(i)(colProduct)) = productCode And PRIME_IsOpIdCommitted(CStr(table(i)(colOpId))) Then
+            Dim rowContour As String
+            rowContour = ""
+            If colContour >= 0 Then rowContour = CStr(table(i)(colContour))
+            If contourFilter <> "" And rowContour <> contourFilter Then GoTo ContinueLoop
             Dim loc As String
             loc = CStr(table(i)(colLoc))
             foundIdx = -1
@@ -308,19 +364,24 @@ Public Sub PRIME_StockByLocation(ByVal productCode As String, ByRef locations() 
             Next j
             If foundIdx = -1 Then
                 locations(locCount) = loc
+                contours(locCount) = rowContour
                 quantities(locCount) = CDbl(table(i)(colQty))
                 locCount = locCount + 1
             Else
                 quantities(foundIdx) = quantities(foundIdx) + CDbl(table(i)(colQty))
+                If rowContour <> "" Then contours(foundIdx) = rowContour
             End If
         End If
+ContinueLoop:
     Next i
 
     If locCount = 0 Then
         ReDim locations(-1)
         ReDim quantities(-1)
+        ReDim contours(-1)
     Else
         ReDim Preserve locations(locCount - 1)
         ReDim Preserve quantities(locCount - 1)
+        ReDim Preserve contours(locCount - 1)
     End If
 End Sub

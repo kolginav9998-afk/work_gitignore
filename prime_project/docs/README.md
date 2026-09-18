@@ -1,4 +1,4 @@
-# ПОКАТАК PRIME 2.0.0
+# ПОКАТАК PRIME 2.0.1
 
 Локальный складской учёт (WMS) на LibreOffice Calc + Basic. Одна книга, один каталог товаров,
 один внутренний код, один posting engine, один журнал движений, один FIFO, один механизм
@@ -27,8 +27,8 @@ prime_project/
 ```bash
 sudo apt-get install -y libreoffice-calc xvfb
 cd prime_project
-python3 tools/build_ods.py --output build/ПОКАТАК_PRIME_2.0.0.ods
-python3 tests/static_checks.py build/ПОКАТАК_PRIME_2.0.0.ods
+python3 tools/build_ods.py --output build/ПОКАТАК_PRIME_2.0.1.ods
+python3 tests/static_checks.py build/ПОКАТАК_PRIME_2.0.1.ods
 python3 tests/model_tests.py
 ```
 
@@ -39,6 +39,7 @@ python3 tests/model_tests.py
 - [POSTING_PROTOCOL.md](POSTING_PROTOCOL.md) — транзакционный протокол проведения документов
 - [TEST_MATRIX.md](TEST_MATRIX.md) — что и как проверяется, включая известные ограничения тестов
 - [MIGRATION.md](MIGRATION.md) — миграция 1.4.1 → 2.0.0
+- [MIGRATION_2.0.0_TO_2.0.1.md](MIGRATION_2.0.0_TO_2.0.1.md) — миграция 2.0.0 → 2.0.1
 - [KNOWN_ISSUES.md](KNOWN_ISSUES.md) — известные ограничения текущего релиза
 - [CHANGELOG.md](CHANGELOG.md) — история изменений
 - [decisions/](decisions/) — architecture decision records (ADR)

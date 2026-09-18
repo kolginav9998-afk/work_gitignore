@@ -6,57 +6,72 @@ Option Explicit
 ' см. ARCHITECTURE §0/§2). Любое проведение документа, из какого бы листа оно ни пришло,
 ' проходит через один и тот же лок.
 
-Private gPrimeOpLockDepth As Long        ' вложенный счётчик операции (posting), не boolean
-Private gPrimeEventLockDepth As Long     ' вложенный счётчик события Contents changed
+' PRIME 2.0.1: оба лока переписаны как простые булевы мьютексы (не вложенные счётчики).
+' 2.0.0 багфикс: PRIME_TryEnter только считал глубину и ВСЕГДА возвращал True - реального
+' взаимного исключения не было, двойной клик/повторный вход не блокировался вовсе. Ни
+' PRIME_PostDocument, ни какой-либо другой код в кодовой базе не полагается на вложенный
+' (реентерабельный) вызов PRIME_TryEnter изнутри уже захваченной операции - единственный
+' вызывающий каждого лока сам ставит guard один раз на верхнем уровне - поэтому простой
+' boolean corректен и не меняет легитимные сценарии использования.
+Private gPrimeOpLocked As Boolean
+Private gPrimeEventLocked As Boolean     ' было: вложенный счётчик; см. фикс ниже
 Private gPrimeControllersLocked As Boolean
 
-' Пытается войти в критическую секцию проведения. Возвращает False, если операция уже идёт
-' на верхнем уровне (защита от двойного клика/повторного входа) - но вложенные вызовы одного
-' и того же логического потока (например, PostDocument вызывает вспомогательные функции)
-' увеличивают глубину, а не блокируются.
+' Пытается войти в критическую секцию проведения. Возвращает False, если операция уже
+' выполняется (double_click_idempotent: двойной клик/повторный вход не должен запускать
+' второе проведение). Вызывающий (PRIME_PostDocument) ОБЯЗАН проверить результат и не
+' продолжать при False - см. required_behavior в мастер-задании 2.0.1.
 Public Function PRIME_TryEnter() As Boolean
-    gPrimeOpLockDepth = gPrimeOpLockDepth + 1
+    If gPrimeOpLocked Then
+        PRIME_TryEnter = False
+        Exit Function
+    End If
+    gPrimeOpLocked = True
     PRIME_TryEnter = True
 End Function
 
+' Идемпотентно: снимать лок можно, даже если он уже снят (например, cleanup вызван дважды
+' на разных путях выхода) - без риска "занизить" чужой лок, т.к. лок один на процесс/сеанс.
 Public Sub PRIME_Leave()
-    If gPrimeOpLockDepth > 0 Then
-        gPrimeOpLockDepth = gPrimeOpLockDepth - 1
-    End If
-    If gPrimeOpLockDepth = 0 And gPrimeControllersLocked Then
+    gPrimeOpLocked = False
+    If gPrimeControllersLocked Then
         PRIME_UnlockControllers()
     End If
 End Sub
 
 Public Function PRIME_IsOpLocked() As Boolean
-    PRIME_IsOpLocked = (gPrimeOpLockDepth > 0)
+    PRIME_IsOpLocked = gPrimeOpLocked
 End Function
 
 ' Event guard для PRIME_OnContentChanged: программный ввод внутри posting/lookup не должен
 ' повторно триггерить обработчик события (аналог того, что в 1.4.1 частично делал gWMSORD_Busy,
 ' но здесь - единая реализация для всех листов).
+' 2.0.0 багфикс: при повторном (вложенном) входе старый код увеличивал depth И возвращал
+' False. Каждый вызывающий использует паттерн "If Not PRIME_EventEnter() Then Exit Sub" -
+' то есть при False он НИКОГДА не вызывает PRIME_EventLeave (выходит раньше). Из-за этого
+' depth, увеличенный на вложенном вызове, никогда не уменьшался обратно - guard "залипал"
+' навсегда после первого же вложенного события (например, программное автозаполнение поля
+' внутри обработчика, которое само генерирует ContentChanged). Теперь при блокировке depth
+' НЕ меняется вовсе - симметрия Enter/Leave сохраняется только для успешных (True) входов.
 Public Function PRIME_EventEnter() As Boolean
-    If gPrimeEventLockDepth > 0 Then
-        gPrimeEventLockDepth = gPrimeEventLockDepth + 1
-        PRIME_EventEnter = False ' сигнал вызывающему: событие уже обрабатывается, выйти
+    If gPrimeEventLocked Then
+        PRIME_EventEnter = False ' уже обрабатывается - вызывающий обязан выйти, НЕ вызывая EventLeave
         Exit Function
     End If
-    gPrimeEventLockDepth = 1
+    gPrimeEventLocked = True
     PRIME_EventEnter = True
 End Function
 
 Public Sub PRIME_EventLeave()
-    If gPrimeEventLockDepth > 0 Then
-        gPrimeEventLockDepth = gPrimeEventLockDepth - 1
-    End If
+    gPrimeEventLocked = False
 End Sub
 
-' Сброс на случай, если предыдущий запуск завершился аварийно и счётчики "залипли"
+' Сброс на случай, если предыдущий запуск завершился аварийно и лок "залип"
 ' (кнопка "Проверить PRIME" / диагностика может вызвать это явно, но НЕ автоматически при каждом
 ' открытии - иначе можно замаскировать реальную зависшую операцию).
 Public Sub PRIME_ResetRuntimeLock()
-    gPrimeOpLockDepth = 0
-    gPrimeEventLockDepth = 0
+    gPrimeOpLocked = False
+    gPrimeEventLocked = False
     If gPrimeControllersLocked Then
         PRIME_UnlockControllers()
     End If

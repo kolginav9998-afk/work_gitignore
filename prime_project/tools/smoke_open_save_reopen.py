@@ -31,7 +31,16 @@ def make_prop(name, value):
     return p
 
 
+def kill_stale_soffice(profile_dir: Path):
+    # xvfb-run wraps soffice.bin, so terminating the wrapper PID does not reliably kill the
+    # real soffice.bin child - it can linger and hold this profile dir, breaking a later run
+    # that reuses the same fixed path (observed empirically while developing 2.0.1).
+    subprocess.run(["pkill", "-9", "-f", f"soffice.bin.*{profile_dir}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def connect(port: int, profile_dir: Path):
+    kill_stale_soffice(profile_dir)
     proc = subprocess.Popen(
         ["xvfb-run", "-a", "soffice", "--headless", "--invisible", "--nocrashreport",
          "--nodefault", "--norestore", "--nologo", "--nofirststartwizard",
@@ -101,6 +110,7 @@ def main():
             proc.wait(timeout=15)
         except Exception:  # noqa: BLE001
             proc.kill()
+        kill_stale_soffice(profile_dir)
         reopened_path.unlink(missing_ok=True)
 
     if failures:

@@ -6,10 +6,52 @@ Option Explicit
 ' эта функция никогда не пишет ни в один системный лист и не вызывает ThisComponent.store().
 
 Public Sub PRIME_Diagnostics_RunButton()
+    Dim problems As Long
+    Dim report As String
+    report = PRIME_Diagnostics_BuildReport(problems)
+    PRIME_Diagnostics_WriteToSheet(report)
+    MsgBox report
+End Sub
+
+' journal.actions "Открыть документ" (FINAL mega-task) - по DOC_ID из "Журнал" переходит на лист-
+' источник этого документа (SOURCE_SHEET из DB_PRIME_DOCUMENTS), т.к. сами документы не имеют
+' отдельного "просмотра" - они всегда были строкой(ами) на исходном рабочем листе. Read-only
+' навигация, ничего не пишет (см. модуль-шапку).
+Public Sub PRIME_Diagnostics_OpenDocByIdButton()
+    Dim docId As String
+    docId = InputBox("DOC_ID документа для перехода:", "Открыть документ")
+    docId = Trim(docId)
+    If docId = "" Then Exit Sub
+    If Not PRIME_SheetExists(SH_DB_DOCUMENTS) Then Exit Sub
+
+    Dim docHeaders As Variant
+    docHeaders = PRIME_HeaderMap(SH_DB_DOCUMENTS)
+    Dim docTable As Variant
+    docTable = PRIME_ReadTable(SH_DB_DOCUMENTS)
+    Dim idx As Long
+    idx = PRIME_FindRowByKey(docTable, PRIME_ColIndex(docHeaders, "DOC_ID"), docId)
+    If idx = -1 Then
+        MsgBox "Документ " & docId & " не найден в журнале."
+        Exit Sub
+    End If
+
+    Dim sourceSheet As String
+    sourceSheet = CStr(docTable(idx)(PRIME_ColIndex(docHeaders, "SOURCE_SHEET")))
+    If sourceSheet = "" Or Not PRIME_SheetExists(sourceSheet) Then
+        MsgBox "У документа " & docId & " не определён исходный лист."
+        Exit Sub
+    End If
+    ThisComponent.CurrentController.setActiveSheet(PRIME_GetSheet(sourceSheet))
+End Sub
+
+' 2.1.2: вынесено из PRIME_Diagnostics_RunButton, чтобы "Главная" могла получить только число
+' проблем для статус-индикатора ("PRIME OK" / "есть ошибка диагностики"), не показывая MsgBox и
+' не завися от листа "Диагностика PRIME" (он скрыт по умолчанию с 2.1.2, но сами проверки -
+' read-only и не требуют, чтобы лист был виден - см. модуль-шапку выше: store_allowed=false).
+Public Function PRIME_Diagnostics_BuildReport(ByRef problems As Long) As String
     Dim report As String
     report = "ДИАГНОСТИКА PRIME " & Format(Now, "YYYY-MM-DD HH:MM:SS") & Chr(10) & Chr(10)
 
-    Dim problems As Long
     problems = 0
 
     report = report & PRIME_Check_DuplicateProductCodes(problems)
@@ -23,12 +65,20 @@ Public Sub PRIME_Diagnostics_RunButton()
     report = report & PRIME_Check_PreparedTransactions(problems)
     report = report & PRIME_Check_UnitMismatches(problems)
     report = report & PRIME_Check_KitIntegrity(problems)
+    report = report & PRIME_Check_DanglingDocLines(problems)
+    report = report & PRIME_Check_DocumentsWithoutLines(problems)
+    report = report & PRIME_Check_DuplicateCommittedSourceKey(problems)
 
     report = report & Chr(10) & "ИТОГО проблем: " & problems
+    PRIME_Diagnostics_BuildReport = report
+End Function
 
-    PRIME_Diagnostics_WriteToSheet(report)
-    MsgBox report
-End Sub
+Public Function PRIME_Diagnostics_ProblemCount() As Long
+    Dim problems As Long
+    Dim discard As String
+    discard = PRIME_Diagnostics_BuildReport(problems)
+    PRIME_Diagnostics_ProblemCount = problems
+End Function
 
 Private Sub PRIME_Diagnostics_WriteToSheet(ByVal report As String)
     On Error Resume Next ' диагностика не должна упасть, если лист недоступен - но и не пишет в DB_PRIME_*
@@ -379,6 +429,136 @@ Private Function PRIME_Check_UnitMismatches(ByRef problems As Long) As String
         problems = problems + cnt
     End If
     PRIME_Check_UnitMismatches = result
+End Function
+
+' dangling_line (recommendation §43): строка документа, чей DOC_ID не существует в
+' DB_PRIME_DOCUMENTS - не должно происходить при нормальной работе единого posting engine
+' (PRIME_WriteDocumentHeader пишет шапку до строк), но проверяется отдельно на случай ручного
+' редактирования скрытых листов или незавершённой миграции.
+Private Function PRIME_Check_DanglingDocLines(ByRef problems As Long) As String
+    Dim result As String
+    result = ""
+    If Not PRIME_SheetExists(SH_DB_DOC_LINES) Or Not PRIME_SheetExists(SH_DB_DOCUMENTS) Then
+        PRIME_Check_DanglingDocLines = ""
+        Exit Function
+    End If
+    Dim lineHeaders As Variant
+    lineHeaders = PRIME_HeaderMap(SH_DB_DOC_LINES)
+    Dim lineTable As Variant
+    lineTable = PRIME_ReadTable(SH_DB_DOC_LINES)
+    Dim docHeaders As Variant
+    docHeaders = PRIME_HeaderMap(SH_DB_DOCUMENTS)
+    Dim docTable As Variant
+    docTable = PRIME_ReadTable(SH_DB_DOCUMENTS)
+    Dim colLineDocId As Long, colDocDocId As Long
+    colLineDocId = PRIME_ColIndex(lineHeaders, "DOC_ID")
+    colDocDocId = PRIME_ColIndex(docHeaders, "DOC_ID")
+
+    Dim cnt As Long
+    cnt = 0
+    If UBound(lineTable) >= 1 Then
+        Dim i As Long
+        For i = 1 To UBound(lineTable)
+            If PRIME_FindRowByKey(docTable, colDocDocId, CStr(lineTable(i)(colLineDocId))) = -1 Then
+                cnt = cnt + 1
+            End If
+        Next i
+    End If
+    If cnt > 0 Then
+        result = "[ПРОБЛЕМА] Строк документов со ссылкой на несуществующий DOC_ID: " & cnt & Chr(10)
+        problems = problems + cnt
+    End If
+    PRIME_Check_DanglingDocLines = result
+End Function
+
+' document_without_lines (recommendation §43): документ без единой строки - зафиксированная
+' операция обязана иметь хотя бы одну строку (PRIME_ValidateAndExpandPlan отклоняет пустой
+' план ДО записи, поэтому это тоже "не должно происходить", а не ожидаемое состояние).
+Private Function PRIME_Check_DocumentsWithoutLines(ByRef problems As Long) As String
+    Dim result As String
+    result = ""
+    If Not PRIME_SheetExists(SH_DB_DOCUMENTS) Or Not PRIME_SheetExists(SH_DB_DOC_LINES) Then
+        PRIME_Check_DocumentsWithoutLines = ""
+        Exit Function
+    End If
+    Dim docHeaders As Variant
+    docHeaders = PRIME_HeaderMap(SH_DB_DOCUMENTS)
+    Dim docTable As Variant
+    docTable = PRIME_ReadTable(SH_DB_DOCUMENTS)
+    Dim lineHeaders As Variant
+    lineHeaders = PRIME_HeaderMap(SH_DB_DOC_LINES)
+    Dim lineTable As Variant
+    lineTable = PRIME_ReadTable(SH_DB_DOC_LINES)
+    Dim colDocDocId As Long, colLineDocId As Long
+    colDocDocId = PRIME_ColIndex(docHeaders, "DOC_ID")
+    colLineDocId = PRIME_ColIndex(lineHeaders, "DOC_ID")
+
+    Dim cnt As Long
+    cnt = 0
+    If UBound(docTable) >= 1 Then
+        Dim i As Long
+        For i = 1 To UBound(docTable)
+            If PRIME_FindRowByKey(lineTable, colLineDocId, CStr(docTable(i)(colDocDocId))) = -1 Then
+                cnt = cnt + 1
+            End If
+        Next i
+    End If
+    If cnt > 0 Then
+        result = "[ПРОБЛЕМА] Документов без единой строки: " & cnt & Chr(10)
+        problems = problems + cnt
+    End If
+    PRIME_Check_DocumentsWithoutLines = result
+End Function
+
+' Дубли SOURCE_KEY среди COMMITTED-транзакций - при нормальной работе идемпотентности
+' (PRIME_FindCommittedBySourceKey проверяется ДО записи) не должно возникать вовсе; проверка
+' нужна, чтобы обнаружить ручную порчу SYS_PRIME_TX или скрытый дефект идемпотентности.
+Private Function PRIME_Check_DuplicateCommittedSourceKey(ByRef problems As Long) As String
+    Dim result As String
+    result = ""
+    If Not PRIME_SheetExists(SH_SYS_TX) Then
+        PRIME_Check_DuplicateCommittedSourceKey = ""
+        Exit Function
+    End If
+    Dim headers As Variant
+    headers = PRIME_HeaderMap(SH_SYS_TX)
+    Dim table As Variant
+    table = PRIME_ReadTable(SH_SYS_TX)
+    Dim colSourceKey As Long, colState As Long
+    colSourceKey = PRIME_ColIndex(headers, "SOURCE_KEY")
+    colState = PRIME_ColIndex(headers, "STATE")
+
+    Dim seen() As String
+    ReDim seen(UBound(table))
+    Dim seenCount As Long
+    seenCount = 0
+    Dim cnt As Long
+    cnt = 0
+
+    If UBound(table) >= 1 Then
+        Dim i As Long, j As Long, isDup As Boolean
+        For i = 1 To UBound(table)
+            If CStr(table(i)(colState)) = TX_COMMITTED Then
+                Dim k As String
+                k = CStr(table(i)(colSourceKey))
+                isDup = False
+                For j = 0 To seenCount - 1
+                    If seen(j) = k Then isDup = True : Exit For
+                Next j
+                If isDup Then
+                    cnt = cnt + 1
+                Else
+                    seen(seenCount) = k
+                    seenCount = seenCount + 1
+                End If
+            End If
+        Next i
+    End If
+    If cnt > 0 Then
+        result = "[ПРОБЛЕМА] Повторных COMMITTED SOURCE_KEY в SYS_PRIME_TX: " & cnt & Chr(10)
+        problems = problems + cnt
+    End If
+    PRIME_Check_DuplicateCommittedSourceKey = result
 End Function
 
 Private Function PRIME_Check_KitIntegrity(ByRef problems As Long) As String

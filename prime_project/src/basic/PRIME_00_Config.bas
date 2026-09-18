@@ -5,8 +5,62 @@ Option Explicit
 ' Никакой логики I/O здесь быть не должно (см. forbidden: очень крупные монолитные функции,
 ' циклические зависимости) - только константы и простые справочные функции.
 
-Public Const PRIME_SCHEMA_VERSION As String = "2.0.0"
-Public Const PRIME_BUILD_DATE As String = "2026-09-16"
+Public Const PRIME_SCHEMA_VERSION As String = "2.2.0"
+Public Const PRIME_BUILD_DATE As String = "2026-09-18"
+
+' --- Контуры остатка (stock_architecture, PRIME 2.1.0; +PRODUCTION в 2.1.2) ---
+' Один и тот же товар может физически лежать в независимо учитываемых контурах: общий склад
+' (Заказы/Выдачи/Возвраты/Перемещения), детали (Приход — Детали, было "Приход/Расход - Цех"),
+' офис (Приход — Офис) и производство (Приход — Производство, новый контур 2.1.2 - см.
+' авторитетный список видимых листов в master task 2.1.2). Контур - часть идентичности
+' партии/движения (наравне с местом хранения), а не отдельная параллельная база -
+' FIFO/остаток обязаны фильтровать по нему.
+Public Const SC_GENERAL As String = "GENERAL"
+Public Const SC_WORKSHOP_DETAILS As String = "WORKSHOP_DETAILS"
+Public Const SC_OFFICE As String = "OFFICE"
+Public Const SC_PRODUCTION As String = "PRODUCTION"
+
+Public Function PRIME_ContourForSheet(ByVal sheetName As String) As String
+    Select Case sheetName
+        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_DETAILS
+            PRIME_ContourForSheet = SC_WORKSHOP_DETAILS
+        Case SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE
+            PRIME_ContourForSheet = SC_OFFICE
+        Case SH_RECEIPT_PRODUCTION
+            PRIME_ContourForSheet = SC_PRODUCTION
+        Case Else
+            PRIME_ContourForSheet = SC_GENERAL
+    End Select
+End Function
+
+Public Function PRIME_ContourDisplayName(ByVal contour As String) As String
+    Select Case contour
+        Case SC_WORKSHOP_DETAILS
+            PRIME_ContourDisplayName = "Детали цеха"
+        Case SC_OFFICE
+            PRIME_ContourDisplayName = "Офис"
+        Case SC_PRODUCTION
+            PRIME_ContourDisplayName = "Производство"
+        Case Else
+            PRIME_ContourDisplayName = "Склад"
+    End Select
+End Function
+
+' Обратное преобразование для ручного ввода на листе "Перемещения" (пользователь вводит
+' привычное название контура, не технический ключ) - нераспознанное/пустое значение
+' консервативно трактуется как общий склад (SC_GENERAL), а не как ошибка ввода.
+Public Function PRIME_ContourFromDisplayName(ByVal displayName As String) As String
+    Select Case LCase(Trim(displayName))
+        Case "детали цеха", "цех", "детали", "workshop_details"
+            PRIME_ContourFromDisplayName = SC_WORKSHOP_DETAILS
+        Case "офис", "office"
+            PRIME_ContourFromDisplayName = SC_OFFICE
+        Case "производство", "production"
+            PRIME_ContourFromDisplayName = SC_PRODUCTION
+        Case Else
+            PRIME_ContourFromDisplayName = SC_GENERAL
+    End Select
+End Function
 
 ' --- Системные (скрытые) листы ---
 Public Const SH_SYS_META As String = "SYS_PRIME_META"
@@ -26,16 +80,28 @@ Public Const SH_DB_KITS As String = "DB_PRIME_KITS"
 Public Const SH_DB_KIT_LINES As String = "DB_PRIME_KIT_LINES"
 Public Const SH_DB_ACTS As String = "DB_PRIME_ACTS"
 Public Const SH_DB_AUDIT As String = "DB_PRIME_AUDIT"
+Public Const SH_DB_RETURN_ALLOCATIONS As String = "DB_PRIME_RETURN_ALLOCATIONS"
 
 ' --- Бизнес-листы (пользовательский UI, сохраняем привычные имена 1.4.1) ---
+' 2.1.2: простой landing/навигационный лист (не дашборд с техническими данными) - см.
+' PRIME_17_Home и авторитетный список видимых листов в master task 2.1.2.
+Public Const SH_HOME As String = "Главная"
 Public Const SH_ORDERS As String = "Заказы"
 Public Const SH_ISSUES As String = "Выдачи"
-Public Const SH_STOCK As String = "Остаток"
+' 2.1.0: "Остаток" переименован в "Наличие" (stock_architecture) - это сводный обзор, а не
+' обязательный ежедневный экран (см. inline stock на рабочих листах). Старое имя листа 1.4.1/
+' 2.0.x переносится сюда только через явную миграцию-переименование (см. MigrationInstaller),
+' само по себе изменение этой константы существующий физический лист не переименовывает.
+Public Const SH_STOCK As String = "Наличие"
+Public Const SH_STOCK_LEGACY_NAME As String = "Остаток"
 Public Const SH_STOCK_ORDERS As String = "Остаток — Заказы"
-Public Const SH_SEARCH As String = "База - Поиск"
+Public Const SH_SEARCH As String = "Поиск"
+Public Const SH_SEARCH_LEGACY_NAME As String = "База - Поиск"
 Public Const SH_RETURNS As String = "Возвраты"
 Public Const SH_INVENTORY As String = "Инвентаризация"
 Public Const SH_KITS As String = "Комплекты"
+Public Const SH_TRANSFERS As String = "Перемещения"
+Public Const SH_JOURNAL As String = "Журнал"
 Public Const SH_DASHBOARD As String = "Дашборд"
 Public Const SH_REPORT_INPUT As String = "Отчет — ввод"
 Public Const SH_REPORT_FINAL As String = "Отчет руководителю"
@@ -47,11 +113,134 @@ Public Const SH_ISSUE_SHOP As String = "Расход — Цех"
 Public Const SH_RECEIPT_OFFICE As String = "Приход — Офис"
 Public Const SH_ISSUE_OFFICE As String = "Расход — Офис"
 
-' Легаси-формы 1.4.1 - только как архив истории, не активные формы ввода (см. ARCHITECTURE §5)
-Public Const SH_LEGACY_RECEIPT_PROD As String = "Приход — Производство"
-Public Const SH_LEGACY_ISSUE_PROD As String = "Расход — Производство"
-Public Const SH_LEGACY_RECEIPT_PARTS As String = "Приход — Детали"
-Public Const SH_LEGACY_ISSUE_PARTS As String = "Расход — Детали"
+' FINAL (mega-prompt): "Приход/Расход — Производство/Детали" перестают быть архивом истории
+' 1.4.1 и становятся активными receipt/issue-workflow листами (см. PRIME_07_Workflows) - отдельная
+' PRODUCTION-метка источника для Производства, WORKSHOP_DETAILS (та же, что раньше была за
+' "Приход — Цех") для Деталей. single_physical_warehouse: эта метка НЕ партиционирует физический
+' остаток (один склад) - только контекст происхождения/назначения движения. Каждая строка
+' прихода получает свой уникальный EI_CODE, без агрегации по имени - тот же engine/те же
+' гарантии, что и у "Приход/Расход — Офис". "Приход/Расход — Цех" (SH_RECEIPT_SHOP/SH_ISSUE_SHOP)
+' полностью выведены из авторитетного списка видимых листов - остаются скрытым архивом, без
+' активного двойника (заменены "...— Детали" на той же метке WORKSHOP_DETAILS).
+Public Const SH_RECEIPT_PRODUCTION As String = "Приход — Производство"
+Public Const SH_RECEIPT_DETAILS As String = "Приход — Детали"
+Public Const SH_ISSUE_PRODUCTION As String = "Расход — Производство"
+Public Const SH_ISSUE_DETAILS As String = "Расход — Детали"
+
+' --- Реестр схемы форм (header_schema_registry, PRIME 2.0.1) ---------------------------------
+' Устраняет дефект 2.0.0: код молча предполагал, что заголовок таблицы всегда в строке 0
+' (0-based). На деле большинство бизнес-листов унаследовали от шаблона 1.4.1 декоративную
+' "шапку" (название + описание + строка статуса) ПЕРЕД реальной строкой заголовка колонок -
+' у "Приход/Расход - Цех/Офис", "Возвраты", "Инвентаризация" заголовок физически в строке 4,
+' у "Остаток" и "База - Поиск" - в строке 5. PRIME_Install_EnsureBusinessSheet при этом молча
+' ничего не делает для уже существующих листов (сборка НЕ создаёт новый лист поверх старого),
+' поэтому весь низкоуровневый доступ (PRIME_02_Store) обязан спрашивать здесь, где на самом
+' деле искать заголовок конкретного листа, а не считать, что это всегда строка 0.
+' Изменение HeaderRow для листа, у которого уже есть реальные пользовательские данные,
+' требует соответствующей миграции (PRIME_14_MigrationInstaller) - само по себе изменение
+' этой функции данные не переносит.
+Public Function PRIME_FormSchemaHeaderRow(ByVal sheetName As String) As Long
+    Select Case sheetName
+        Case SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, SH_RECEIPT_PRODUCTION, SH_RECEIPT_DETAILS, _
+             SH_RETURNS, SH_INVENTORY, SH_STOCK_ORDERS
+            PRIME_FormSchemaHeaderRow = 4
+        Case SH_STOCK, SH_SEARCH
+            PRIME_FormSchemaHeaderRow = 5
+        Case Else
+            ' Заказы, Выдачи, Комплекты, Остаток — Заказы, все SYS_PRIME_*/DB_PRIME_* -
+            ' заголовок в строке 0 (либо унаследовано от 1.4.1 без декоративной шапки,
+            ' либо лист создаётся PRIME с нуля).
+            PRIME_FormSchemaHeaderRow = 0
+    End Select
+End Function
+
+' Первая строка данных = сразу после строки заголовка. Единая точка, используемая вместо
+' разбросанных по коду "магических" 1/2 (header_schema_registry.rules).
+Public Function PRIME_FormSchemaFirstDataRow(ByVal sheetName As String) As Long
+    PRIME_FormSchemaFirstDataRow = PRIME_FormSchemaHeaderRow(sheetName) + 1
+End Function
+
+' --- Статус заказа (order_status_logic, PRIME 2.0.1) ---
+Public Const ORDER_STATUS_DRAFT As String = "Черновик"
+Public Const ORDER_STATUS_EXPECTED As String = "Ожидается"
+Public Const ORDER_STATUS_PARTIAL As String = "Частично получено"
+Public Const ORDER_STATUS_RECEIVED As String = "Получено"
+Public Const ORDER_STATUS_OVERDUE As String = "Просрочено"
+Public Const ORDER_STATUS_CANCELLED As String = "Отменено"
+
+' 2.1.2 empirically-found defect: InStrRev не определена в этой сборке StarBasic ("Sub-procedure
+' or function procedure not defined" - обнаружено при проведении возврата, PRIME_DocIdFromLineId
+' вызывает её на каждый возврат). Единая замена - линейный поиск ПОСЛЕДНЕГО вхождения через InStr.
+Public Function PRIME_LastInStr(ByVal s As String, ByVal find As String) As Long
+    Dim p As Long, lastP As Long
+    lastP = 0
+    p = InStr(1, s, find)
+    Do While p > 0
+        lastP = p
+        p = InStr(p + 1, s, find)
+    Loop
+    PRIME_LastInStr = lastP
+End Function
+
+' Разбор пользовательского ввода даты (PRIME 2.0.1, recommendation dates support):
+' "24.08", "24/08", "24-08", "24.08.2026", "24/08/2026", "24-08-2026". День/месяц идут первыми
+' (формат заказчика, не ISO); год по умолчанию - текущий, если не указан. Возвращает
+' нормализованную "YYYY-MM-DD" либо "" при нераспознанном вводе - лучше оставить ввод как есть
+' (вызывающий не перезапишет ячейку), чем молча исказить дату по неверной догадке о формате.
+Public Function PRIME_ParseFlexibleDate(ByVal inputText As String) As String
+    Dim s As String
+    s = Trim(inputText)
+    If s = "" Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    Dim sep As String
+    If InStr(s, ".") > 0 Then
+        sep = "."
+    ElseIf InStr(s, "/") > 0 Then
+        sep = "/"
+    ElseIf InStr(s, "-") > 0 Then
+        sep = "-"
+    Else
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    Dim parts() As String
+    parts = Split(s, sep)
+    If UBound(parts) < 1 Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+    If Not IsNumeric(parts(0)) Or Not IsNumeric(parts(1)) Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    Dim dayNum As Long, monthNum As Long, yearNum As Long
+    dayNum = CLng(parts(0))
+    monthNum = CLng(parts(1))
+    ' StarBasic "And"/"Or" не короткозамкнуты (в отличие от AndAlso/OrElse) - оба операнда
+    ' вычисляются ВСЕГДА, поэтому "UBound(parts) >= 2 And IsNumeric(parts(2))" обращался бы к
+    ' parts(2) даже когда массив короче (только день+месяц, UBound=1), вызывая "Subscript out
+    ' of range" - в этой среде такая ошибка внутри вызванной извне функции не долетает как
+    ' видимое исключение, а молча обрывает вызывающий Sub целиком. Поэтому - вложенный If.
+    yearNum = Year(Now)
+    If UBound(parts) >= 2 Then
+        If IsNumeric(parts(2)) Then
+            yearNum = CLng(parts(2))
+            If yearNum < 100 Then yearNum = yearNum + 2000
+        End If
+    End If
+
+    If dayNum < 1 Or dayNum > 31 Or monthNum < 1 Or monthNum > 12 Then
+        PRIME_ParseFlexibleDate = ""
+        Exit Function
+    End If
+
+    PRIME_ParseFlexibleDate = Format(yearNum, "0000") & "-" & Format(monthNum, "00") & "-" & Format(dayNum, "00")
+End Function
 
 ' --- Идентичность товара ---
 Public Const PRODUCT_CODE_PREFIX As String = "ЕИ-"
@@ -74,9 +263,12 @@ Public Const TX_CANCELLED As String = "CANCELLED"
 
 ' --- Лимиты производительности / устойчивости ---
 Public Const PRIME_QTY_PRECISION_DIGITS As Integer = 6
-' Должно совпадать с "Lines(99) As PrimeDocLine" в каждой копии Type PrimeDocPlan
-' (PRIME_04_Posting и модули 05/06/07/08, дублирующие Type - см. их комментарии).
-Public Const PRIME_DOC_PLAN_MAX_LINE_INDEX As Long = 99
+' Должно совпадать с "Lines(999) As PrimeDocLine" в каждой копии Type PrimeDocPlan
+' (PRIME_04_Posting и модули 05/06/07/08/15, дублирующие Type - см. их комментарии).
+' 2.1.0: поднято с 99 до 999 (минимум 1000 строк в одном документе, mandatory_document_size) -
+' одна поставка/выдача/возврат/перемещение из многих строк проводится ОДНИМ документом
+' (DOC_ID/OP_ID/store()), а не циклом отдельных PostDocument-вызовов.
+Public Const PRIME_DOC_PLAN_MAX_LINE_INDEX As Long = 999
 Public Const PRIME_IMPORT_TARGET_ROWS As Long = 20000
 Public Const PRIME_MAX_EVENT_ROWS As Long = 1 ' PRIME_OnContentChanged всегда обрабатывает одну строку
 
@@ -93,6 +285,7 @@ Public Const STAGE_VALIDATION_START As String = "VALIDATION_START"
 Public Const STAGE_VALIDATION_OK As String = "VALIDATION_OK"
 Public Const STAGE_PLAN_READY As String = "PLAN_READY"
 Public Const STAGE_TX_PREPARED As String = "TX_PREPARED"
+Public Const STAGE_PRODUCTS_WRITTEN As String = "PRODUCTS_WRITTEN"
 Public Const STAGE_DOCS_WRITTEN As String = "DOCS_WRITTEN"
 Public Const STAGE_LINES_WRITTEN As String = "LINES_WRITTEN"
 Public Const STAGE_LOTS_WRITTEN As String = "LOTS_WRITTEN"
@@ -135,22 +328,35 @@ Public Function PRIME_OrdersBusinessColumns() As Variant
     PRIME_OrdersBusinessColumns = cols
 End Function
 
-' Расширенный хвост (Ожидаемая дата, Назначение/проект, Получено всего, Осталось получить)
+' Расширенный хвост (Ожидаемая дата, Назначение/проект, Получено всего, Осталось получить +
+' 2.1.0 inline stock/traceability: В наличии сейчас, Последний приход, Дата последнего прихода).
+' 2.1.2: "Выдано"/"Возвращено"/"Контур" - используются ТОЛЬКО на дочерних receipt-position
+' строках (см. PRIME_Orders_InsertChildReceiptRow) - на обычной строке заказа остаются пустыми.
 Public Function PRIME_OrdersExtraColumns() As Variant
-    Dim cols(3) As String
+    Dim cols(9) As String
     cols(0) = "Ожидаемая дата"
     cols(1) = "Назначение / проект"
     cols(2) = "Получено всего"
     cols(3) = "Осталось получить"
+    cols(4) = "В наличии сейчас"
+    cols(5) = "Последний приход"
+    cols(6) = "Дата последнего прихода"
+    cols(7) = "Выдано"
+    cols(8) = "Возвращено"
+    cols(9) = "Контур"
     PRIME_OrdersExtraColumns = cols
 End Function
 
-' Скрытые технические helper-колонки листа "Заказы" (avoid_many_hidden_columns => только 3, не 10 как в 1.4.1)
+' Скрытые технические helper-колонки листа "Заказы" (avoid_many_hidden_columns => 4, не 10 как в 1.4.1).
+' 2.1.2: _PRIME_RowType различает обычную строку заказа ("" - order line) от дочерней
+' receipt-position строки ("CHILD" - см. orders_must_show_receipt_positions_directly) - дочерние
+' строки никогда не участвуют как самостоятельные order-lines в проведении/автозаполнении.
 Public Function PRIME_OrdersHiddenColumns() As Variant
-    Dim cols(2) As String
+    Dim cols(3) As String
     cols(0) = "_PRIME_OrderID"
     cols(1) = "_PRIME_LineID"
     cols(2) = "_PRIME_State"
+    cols(3) = "_PRIME_RowType"
     PRIME_OrdersHiddenColumns = cols
 End Function
 
@@ -162,57 +368,74 @@ Public Function PRIME_IssuesHiddenColumns() As Variant
     PRIME_IssuesHiddenColumns = cols
 End Function
 
+' 2.1.0 inline stock (R23): "В наличии" -> "Кол-во" -> "После выдачи" - обе вычисляемые колонки
+' обновляются автозаполнением по коду/вводу количества (см. PRIME_06_Issues) и не хранят
+' независимый остаток - это представление того же COMMITTED-ledger, что и лист "Наличие".
 Public Function PRIME_IssuesColumns() As Variant
-    Dim cols(12) As String
+    Dim cols(14) As String
     cols(0)  = "№"
     cols(1)  = "Код"
     cols(2)  = "Наименование"
-    cols(3)  = "Кол-во"
-    cols(4)  = "Ед. изм."
-    cols(5)  = "Кто получил"
-    cols(6)  = "Дата"
-    cols(7)  = "Откуда"
-    cols(8)  = "Возвратный"
-    cols(9)  = "Возвращено"
-    cols(10) = "Дата возврата"
-    cols(11) = "Назначение / проект"
-    cols(12) = "Примечание"
+    cols(3)  = "В наличии"
+    cols(4)  = "Кол-во"
+    cols(5)  = "После выдачи"
+    cols(6)  = "Ед. изм."
+    cols(7)  = "Кто получил"
+    cols(8)  = "Дата"
+    cols(9)  = "Откуда"
+    cols(10) = "Возвратный"
+    cols(11) = "Возвращено"
+    cols(12) = "Дата возврата"
+    cols(13) = "Назначение / проект"
+    cols(14) = "Примечание"
     PRIME_IssuesColumns = cols
 End Function
 
 ' Приход — Цех / Приход — Офис (единый workflow вместо разных "бухгалтерий" 1.4.1).
 ' "Внутренний код" - обязательное поле, по нему живой lookup (live_code_lookup."Приход — Цех"/"Офис").
-Public Function PRIME_WorkflowReceiptColumns() As Variant
-    Dim cols(11) As String
+' single_physical_warehouse (FINAL): раньше подпись "Остаток .../Будет ..." зависела от контура
+' листа (forbidden_ui_terms в новом задании: "Остаток офиса"/"Будет в офисе"/"Остаток
+' производства"/"Будет в производстве") - один физический склад, поэтому теперь единая колонка
+' "Остаток позиции на складе" для ВСЕХ receipt-листов (Офис/Производство/Детали/легаси Цех),
+' без арифметики "было+пришло" (см. PRIME_07_Workflows.PRIME_Workflow_RefreshInlineStock).
+Public Function PRIME_WorkflowReceiptColumns(ByVal sheetName As String) As Variant
+    Dim cols(14) As String
     cols(0)  = "Дата"
     cols(1)  = "Внутренний код"
     cols(2)  = "Наименование"
     cols(3)  = "Артикул"
-    cols(4)  = "Кол-во"
+    cols(4)  = "Количество прихода"
     cols(5)  = "Ед. изм."
-    cols(6)  = "Кто сдал"
-    cols(7)  = "Место хранения"
-    cols(8)  = "Категория"
-    cols(9)  = "Подкатегория"
-    cols(10) = "Документ"
-    cols(11) = "Комментарий"
+    cols(6)  = "Место хранения на складе"
+    cols(7)  = "Остаток позиции на складе"
+    cols(8)  = "Кто сдал"
+    cols(9)  = "Категория"
+    cols(10) = "Подкатегория"
+    cols(11) = "Документ"
+    cols(12) = "Комментарий"
+    cols(13) = "DOC_ID"
+    cols(14) = "Статус"
     PRIME_WorkflowReceiptColumns = cols
 End Function
 
-Public Function PRIME_WorkflowIssueColumns() As Variant
-    Dim cols(11) As String
+' single_physical_warehouse (FINAL): та же единая логика для Расход — Офис/Производство/Детали
+' (+легаси Цех) - "Кто принял"/"Куда / назначение" вместо старых "Кому"/"Назначение / проект"
+' (preferred_ui_terms), единая колонка остатка вместо "Остаток .../Будет ...".
+Public Function PRIME_WorkflowIssueColumns(ByVal sheetName As String) As Variant
+    Dim cols(12) As String
     cols(0)  = "Дата"
     cols(1)  = "Внутренний код"
     cols(2)  = "Наименование"
     cols(3)  = "Артикул"
-    cols(4)  = "Кол-во"
+    cols(4)  = "Количество"
     cols(5)  = "Ед. изм."
-    cols(6)  = "Кому"
-    cols(7)  = "Место хранения"
-    cols(8)  = "Возвратный"
-    cols(9)  = "Назначение / проект"
-    cols(10) = "Документ"
-    cols(11) = "Комментарий"
+    cols(6)  = "Место хранения"
+    cols(7)  = "Остаток позиции на складе"
+    cols(8)  = "Кто принял"
+    cols(9)  = "Куда / назначение"
+    cols(10) = "Возвратный"
+    cols(11) = "Документ"
+    cols(12) = "Комментарий"
     PRIME_WorkflowIssueColumns = cols
 End Function
 
@@ -233,8 +456,11 @@ Public Function PRIME_SysTxColumns() As Variant
 End Function
 
 Public Function PRIME_DbProductsColumns() As Variant
+    ' OP_ID: пусто = видим всегда (миграция/легаси/прямое создание); непусто = видим только когда
+    ' PRIME_IsOpIdCommitted(OP_ID)=True (транзакционное создание нового товара внутри проведения,
+    ' см. PRIME_04_Posting.PRIME_WriteNewProductsIfAny и PRIME_03_Catalog.PRIME_BuildProductIndex).
     PRIME_DbProductsColumns = Array("PRODUCT_CODE", "PRODUCT_NAME", "BASE_UNIT", "DEFAULT_LOCATION", _
-        "CATEGORY", "SUBCATEGORY", "RETURNABLE", "ACCOUNT_TYPE", "ACTIVE", "CREATED_AT", "UPDATED_AT")
+        "CATEGORY", "SUBCATEGORY", "RETURNABLE", "ACCOUNT_TYPE", "ACTIVE", "CREATED_AT", "UPDATED_AT", "OP_ID")
 End Function
 
 Public Function PRIME_DbAliasesColumns() As Variant
@@ -246,8 +472,11 @@ Public Function PRIME_DbProductUnitsColumns() As Variant
     PRIME_DbProductUnitsColumns = Array("PRODUCT_CODE", "UNIT_NAME", "FACTOR_TO_BASE", "ACTIVE")
 End Function
 
+' OP_ID добавлен в 2.1.0 (committed_only_everywhere): позволяет проверить, что владеющая
+' транзакция реально COMMITTED, не читая отдельный SYS_PRIME_TX по SOURCE_KEY - см.
+' PRIME_02_Store.PRIME_IsDocIdCommitted.
 Public Function PRIME_DbDocumentsColumns() As Variant
-    PRIME_DbDocumentsColumns = Array("DOC_ID", "DOC_TYPE", "DOC_DATE", "SOURCE_SHEET", "SOURCE_KEY", "ORDER_ID", "STATUS")
+    PRIME_DbDocumentsColumns = Array("DOC_ID", "DOC_TYPE", "DOC_DATE", "SOURCE_SHEET", "SOURCE_KEY", "ORDER_ID", "STATUS", "OP_ID")
 End Function
 
 Public Function PRIME_DbDocLinesColumns() As Variant
@@ -255,26 +484,52 @@ Public Function PRIME_DbDocLinesColumns() As Variant
         "LOCATION_FROM", "LOCATION_TO", "DESTINATION_PROJECT", "RECIPIENT", "COMMENT")
 End Function
 
+' STOCK_CONTOUR добавлен в 2.1.0 (stock_architecture) - см. PRIME_ContourForSheet.
 Public Function PRIME_DbMovementsColumns() As Variant
     PRIME_DbMovementsColumns = Array("MOVE_ID", "DOC_ID", "DOC_LINE_ID", "PRODUCT_CODE", "LOT_ID", "QTY_BASE", _
-        "LOCATION", "MOVE_DATE", "OP_ID")
+        "LOCATION", "MOVE_DATE", "OP_ID", "STOCK_CONTOUR")
 End Function
 
+' STOCK_CONTOUR/PARENT_LOT_ID добавлены в 2.1.0: партия физически привязана к одному
+' месту+контуру и никогда не "телепортируется" - перемещение создаёт НОВУЮ партию с
+' PARENT_LOT_ID = исходная (lot lineage, critical_fixes.transfer), инвентаризация консервативно
+' расходует/создаёт партии так же, как обычное списание/приход (critical_fixes.inventory).
 Public Function PRIME_DbLotsColumns() As Variant
     PRIME_DbLotsColumns = Array("LOT_ID", "PRODUCT_CODE", "RECEIPT_DOC_ID", "RECEIPT_LINE_ID", "RECEIPT_DATE", _
-        "LOCATION", "ORIGINAL_QTY_BASE", "BASE_UNIT", "ORIGIN", "ORDER_ID")
+        "LOCATION", "ORIGINAL_QTY_BASE", "BASE_UNIT", "ORIGIN", "ORDER_ID", "STOCK_CONTOUR", "PARENT_LOT_ID")
 End Function
 
 Public Function PRIME_DbAllocationsColumns() As Variant
     PRIME_DbAllocationsColumns = Array("ALLOC_ID", "DOC_LINE_ID", "LOT_ID", "QTY_BASE")
 End Function
 
+' OP_ID добавлен в 2.1.0 - без него неудавшийся (FAILED) возврат, чьи строки уже физически
+' попали в лист до отката, ошибочно уменьшал бы "Осталось к возврату" навсегда (см. критику
+' в REQUIREMENTS_MATRIX R07/R08).
 Public Function PRIME_DbReturnsColumns() As Variant
-    PRIME_DbReturnsColumns = Array("RETURN_ID", "ORIGINAL_ISSUE_DOC_LINE_ID", "RETURN_DOC_ID", "QTY_BASE", "RETURN_DATE")
+    PRIME_DbReturnsColumns = Array("RETURN_ID", "ORIGINAL_ISSUE_DOC_LINE_ID", "RETURN_DOC_ID", "QTY_BASE", "RETURN_DATE", "OP_ID")
 End Function
 
+' Новая таблица 2.1.0 (R08): какая ЧАСТЬ какой конкретной allocation исходной выдачи уже была
+' возвращена - без неё второй частичный возврат снова "с нуля" проходит allocations по FIFO и
+' может повторно вернуть в ту же самую партию, из которой уже был засчитан первый возврат,
+' вместо следующей по очереди (см. REQUIREMENTS_MATRIX R08).
+Public Function PRIME_DbReturnAllocationsColumns() As Variant
+    PRIME_DbReturnAllocationsColumns = Array("RETURN_ID", "ALLOC_ID", "LOT_ID", "QTY_BASE", "OP_ID")
+End Function
+
+' Полный immutable snapshot заказа (2.1.0, R13) - копия всех значимых реквизитов заказа И
+' поставки на момент проведения прихода, не только количества/партии, как в 2.0.x. Реквизиты
+' поставщика/счёта/цены и т.п. не восстановимы из мутируемого листа "Заказы" впоследствии,
+' поэтому должны быть скопированы сюда в момент commit, а не вычисляться на лету при просмотре.
 Public Function PRIME_DbOrderSnapshotColumns() As Variant
-    PRIME_DbOrderSnapshotColumns = Array("ORDER_ID", "RECEIPT_DOC_ID", "LOT_ID", "DELIVERY_QTY", "PRODUCT_CODE", "DOC_DATE")
+    PRIME_DbOrderSnapshotColumns = Array( _
+        "ORDER_ID", "ORDER_LINE_ID", "RECEIPT_DOC_ID", "RECEIPT_LINE_ID", "LOT_ID", _
+        "PRODUCT_CODE", "PRODUCT_NAME", "SUPPLIER_OR_PLATFORM", "SELLER", "SUPPLIER_CODE", _
+        "SUPPLIER_ARTICLE", "INVOICE_NUMBER", "DOCUMENT_NUMBER", "ORDER_DATE", "EXPECTED_DATE", _
+        "DOCUMENT_DATE", "RECEIPT_DATE", "ORDERED_QTY", "RECEIVED_QTY", "UNIT", "PRICE", _
+        "AMOUNT", "BUYER", "CATEGORY", "SUBCATEGORY", "LOCATION", "STOCK_CONTOUR", _
+        "DESTINATION_PROJECT", "COMMENT")
 End Function
 
 ' DB_PRIME_KITS/KIT_LINES заведены структурно (system_sheets), но в первом релизе фактическим
@@ -328,16 +583,73 @@ Public Function PRIME_ReturnsHiddenColumns() As Variant
     PRIME_ReturnsHiddenColumns = cols
 End Function
 
-' Лист "Остаток" - view поверх COMMITTED-движений, batch_output, без скрытого 2000-лимита.
+' Лист "Наличие" (2.1.0, было "Остаток"; FINAL mega-task: single_physical_warehouse) - сводный
+' view поверх COMMITTED-движений ОДНОГО физического склада, batch_output, без скрытого
+' 2000-лимита. primary_grain=EI_CODE (=PRODUCT_CODE) - одна строка на реальную позицию
+' (EI_CODE, место), без агрегации одноимённых/разных EI. "Тип/источник" - не физический раздел
+' склада, а метка происхождения (Заказы/Приход — Офис/Приход — Производство/Приход — Детали),
+' см. PRIME_09_StockSearch.PRIME_Stock_ResolveLotRoot. Остаток по каждой позиции также
+' дублируется inline на рабочих листах (см. PRIME_OrdersExtraColumns/WorkflowReceipt/
+' IssueColumns/IssuesColumns), здесь - только общий обзор с быстрыми фильтрами по происхождению.
 Public Function PRIME_StockColumns() As Variant
-    Dim cols(5) As String
-    cols(0) = "Код"
+    Dim cols(9) As String
+    cols(0) = "Внутренний код"
     cols(1) = "Наименование"
-    cols(2) = "Ед. изм."
+    cols(2) = "Тип/источник"
     cols(3) = "Место хранения"
-    cols(4) = "Остаток"
-    cols(5) = "Последняя операция"
+    cols(4) = "Пришло"
+    cols(5) = "Выдано/списано"
+    cols(6) = "Возвращено"
+    cols(7) = "Остаток"
+    cols(8) = "Дата прихода"
+    cols(9) = "Исходный DOC_ID"
     PRIME_StockColumns = cols
+End Function
+
+' Лист "Перемещения" (2.1.0, новый; FINAL mega-task: transfers.rule) - перемещение конкретного
+' EI МЕЖДУ МЕСТАМИ ХРАНЕНИЯ внутри одного физического склада, с сохранением партийности (lot
+' lineage) и происхождения (PRIME_04_Posting.PRIME_PostTransferLines наследует ORIGIN/
+' STOCK_CONTOUR исходной партии). "Контур — откуда/куда" убраны из пользовательского ввода -
+' transfers.rule прямо запрещает менять источник происхождения EI при перемещении, оставляя
+' только выбор места хранения.
+Public Function PRIME_TransfersColumns() As Variant
+    Dim cols(7) As String
+    cols(0) = "Дата"
+    cols(1) = "Внутренний код"
+    cols(2) = "Наименование"
+    cols(3) = "Кол-во"
+    cols(4) = "Ед. изм."
+    cols(5) = "Место — откуда"
+    cols(6) = "Место — куда"
+    cols(7) = "Комментарий"
+    PRIME_TransfersColumns = cols
+End Function
+
+Public Function PRIME_TransfersHiddenColumns() As Variant
+    Dim cols(0) As String
+    cols(0) = "_PRIME_TransferState"
+    PRIME_TransfersHiddenColumns = cols
+End Function
+
+' Лист "Журнал" (2.1.0, новый) - только COMMITTED документы, read-only, по кнопке "Обновить"
+' (batch_output, не построчный пересчёт). FINAL mega-task: "Контур" убран (single_physical_
+' warehouse - контур больше не физический раздел склада, а "Источник" уже несёт ту же
+' содержательную метку происхождения - см. PRIME_16_Journal.PRIME_Journal_RefreshButton) - вместо
+' него "Куда" (journal.columns: Источник/Куда) - место назначения строки документа, полезное
+' для Выдачи/Перемещений, где "Источник" один и тот же, а конечная точка отличается.
+Public Function PRIME_JournalColumns() As Variant
+    Dim cols(9) As String
+    cols(0) = "DOC_ID"
+    cols(1) = "OP_ID"
+    cols(2) = "Тип"
+    cols(3) = "Дата/время"
+    cols(4) = "Статус"
+    cols(5) = "Источник"
+    cols(6) = "Куда"
+    cols(7) = "Поставщик/Получатель"
+    cols(8) = "Количество строк"
+    cols(9) = "Комментарий"
+    PRIME_JournalColumns = cols
 End Function
 
 ' Лист "Остаток — Заказы" - снимки заказа + остаток соответствующей партии (include_zero_lot_balance).
@@ -381,17 +693,21 @@ Public Function PRIME_KitsColumns() As Variant
     PRIME_KitsColumns = cols
 End Function
 
+' 2.1.0: добавлена "Контур" - инвентаризация теперь снимает остаток по каждому (месту, контуру)
+' отдельно (R06 lot-consistency), а не только по месту, иначе один и тот же код на одном месте,
+' но в разных контурах (склад/детали цеха), задваивал бы разницу.
 Public Function PRIME_InventoryColumns() As Variant
-    Dim cols(9) As String
+    Dim cols(10) As String
     cols(0) = "Сессия"
     cols(1) = "Код"
     cols(2) = "Наименование"
     cols(3) = "Место"
-    cols(4) = "Категория"
-    cols(5) = "Подкатегория"
-    cols(6) = "Учёт"
-    cols(7) = "Факт"
-    cols(8) = "Разница"
-    cols(9) = "Ед. изм."
+    cols(4) = "Контур"
+    cols(5) = "Категория"
+    cols(6) = "Подкатегория"
+    cols(7) = "Учёт"
+    cols(8) = "Факт"
+    cols(9) = "Разница"
+    cols(10) = "Ед. изм."
     PRIME_InventoryColumns = cols
 End Function

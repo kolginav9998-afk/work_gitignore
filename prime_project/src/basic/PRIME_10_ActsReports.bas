@@ -14,6 +14,12 @@ Public Sub PRIME_Acts_CreateFromDocButton()
     PRIME_Acts_CreateAct(Trim(docId))
 End Sub
 
+' FINAL mega-task (acts.critical_business_rule): акт НЕ должен требовать от пользователя внешний
+' номер документа, если его нет в реальном процессе - здесь его и не было (единственный ввод -
+' внутренний DOC_ID из уже COMMITTED-документа, external_document_number_optional=true уже
+' соблюдено самой сигнатурой этой функции). Номер акта генерируется автоматически в формате
+' "АКТ-YYYYMMDD-NNNN" (acts.number_format example) - дата создания + сквозной счётчик, а не
+' зависящий от внешнего номера накладной/счёта.
 Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
     On Error Goto Fail
 
@@ -31,6 +37,19 @@ Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
         PRIME_Acts_CreateAct = ""
         Exit Function
     End If
+    ' committed_only_everywhere: акт строится из уже проведённого документа (per acts.critical_
+    ' business_rule - "generated from an already-COMMITTED operation"), не из черновика.
+    If Not PRIME_IsDocIdCommitted(docId) Then
+        MsgBox "Документ " & docId & " ещё не проведён (не COMMITTED) - акт не создан."
+        PRIME_Acts_CreateAct = ""
+        Exit Function
+    End If
+
+    Dim actNumber As String
+    actNumber = "АКТ-" & Format(Now, "YYYYMMDD") & "-" & Format(PRIME_SequenceNext("ACT_ID"), "0000")
+
+    Dim sourceSheet As String
+    sourceSheet = CStr(docTable(docIdx)(PRIME_ColIndex(docHeaders, "SOURCE_SHEET")))
 
     Dim oDesktop As Object
     oDesktop = createUnoService("com.sun.star.frame.Desktop")
@@ -47,17 +66,34 @@ Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
 
     oCur.CharHeight = 14
     oCur.CharWeight = com.sun.star.awt.FontWeight.BOLD
-    oText.insertString(oCur, "АКТ по документу " & docId, False)
+    oText.insertString(oCur, "АКТ " & actNumber, False)
     oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
     oCur.CharWeight = com.sun.star.awt.FontWeight.NORMAL
     oCur.CharHeight = 11
-    oText.insertString(oCur, "Тип: " & CStr(docTable(docIdx)(PRIME_ColIndex(docHeaders, "DOC_TYPE"))) & _
-        "   Дата: " & CStr(docTable(docIdx)(PRIME_ColIndex(docHeaders, "DOC_DATE"))), False)
+    oText.insertString(oCur, "Дата: " & CStr(docTable(docIdx)(PRIME_ColIndex(docHeaders, "DOC_DATE"))) & _
+        "   Тип: " & CStr(docTable(docIdx)(PRIME_ColIndex(docHeaders, "DOC_TYPE"))) & _
+        "   Документ: " & docId, False)
+    oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
+
+    Dim colDocId As Long, colDestProject As Long, colRecipient As Long
+    colDocId = PRIME_ColIndex(lineHeaders, "DOC_ID")
+    colDestProject = PRIME_ColIndex(lineHeaders, "DESTINATION_PROJECT")
+    colRecipient = PRIME_ColIndex(lineHeaders, "RECIPIENT")
+    Dim destination As String, recipientName As String
+    destination = ""
+    recipientName = ""
+    If UBound(lineTable) >= 1 Then
+        Dim firstIdx As Long
+        firstIdx = PRIME_FindRowByKey(lineTable, colDocId, docId)
+        If firstIdx >= 0 Then
+            If colDestProject >= 0 Then destination = CStr(lineTable(firstIdx)(colDestProject))
+            If colRecipient >= 0 Then recipientName = CStr(lineTable(firstIdx)(colRecipient))
+        End If
+    End If
+    oText.insertString(oCur, "Откуда: " & sourceSheet & "   Куда: " & destination, False)
     oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
     oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
 
-    Dim colDocId As Long
-    colDocId = PRIME_ColIndex(lineHeaders, "DOC_ID")
     Dim lineCount As Long
     lineCount = 0
     If UBound(lineTable) >= 1 Then
@@ -66,11 +102,17 @@ Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
             If CStr(lineTable(i)(colDocId)) = docId Then
                 Dim productCode As String
                 productCode = CStr(lineTable(i)(PRIME_ColIndex(lineHeaders, "PRODUCT_CODE")))
+                Dim article As String
+                article = PRIME_GetProductField(productCode, "SUPPLIER_ARTICLE")
                 lineCount = lineCount + 1
                 Dim txt As String
-                txt = lineCount & ". Код: " & productCode & "   " & PRIME_GetProductField(productCode, "PRODUCT_NAME") & _
-                    "   Кол-во: " & CStr(lineTable(i)(PRIME_ColIndex(lineHeaders, "QTY_BASE"))) & " " & _
+                txt = lineCount & ". EI_CODE: " & productCode & "   " & PRIME_GetProductField(productCode, "PRODUCT_NAME")
+                If article <> "" Then txt = txt & "   Артикул: " & article
+                txt = txt & "   Кол-во: " & CStr(lineTable(i)(PRIME_ColIndex(lineHeaders, "QTY_BASE"))) & " " & _
                     CStr(lineTable(i)(PRIME_ColIndex(lineHeaders, "UNIT")))
+                Dim lineComment As String
+                lineComment = CStr(lineTable(i)(PRIME_ColIndex(lineHeaders, "COMMENT")))
+                If lineComment <> "" Then txt = txt & "   Комментарий: " & lineComment
                 oText.insertString(oCur, txt, False)
                 oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
             End If
@@ -83,6 +125,12 @@ Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
         PRIME_Acts_CreateAct = ""
         Exit Function
     End If
+
+    oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
+    oText.insertString(oCur, "Передал: " & recipientName & " ______________________ (подпись)", False)
+    oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
+    oText.insertString(oCur, "Принял: _________________________________ (подпись)", False)
+    oText.insertControlCharacter(oCur, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False)
 
     Dim actsDir As String
     actsDir = PRIME_EnsureDir(PRIME_DIR_ACTS)
@@ -98,7 +146,7 @@ Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
     Dim actHeaders As Variant
     actHeaders = PRIME_HeaderMap(SH_DB_ACTS)
     Dim row(UBound(actHeaders)) As Variant
-    row(PRIME_ColIndex(actHeaders, "ACT_ID")) = "ACT-" & Format(PRIME_SequenceNext("ACT_ID"), "00000000")
+    row(PRIME_ColIndex(actHeaders, "ACT_ID")) = actNumber
     row(PRIME_ColIndex(actHeaders, "DOC_ID")) = docId
     row(PRIME_ColIndex(actHeaders, "FILE_PATH")) = fullPath
     row(PRIME_ColIndex(actHeaders, "GENERATED_AT")) = Format(Now, "YYYY-MM-DD HH:MM:SS")
@@ -107,7 +155,7 @@ Public Function PRIME_Acts_CreateAct(ByVal docId As String) As String
     rows(0) = row
     PRIME_AppendRowsBatch(SH_DB_ACTS, rows)
 
-    MsgBox "Акт создан: " & fullPath
+    MsgBox "Акт " & actNumber & " создан: " & fullPath
     PRIME_Acts_CreateAct = fullPath
     Exit Function
 
@@ -145,7 +193,7 @@ Public Function PRIME_DocDir() As String
     Dim p As String
     p = ConvertFromURL(ThisComponent.getURL())
     Dim i As Long
-    i = InStrRev(p, GetPathSeparator())
+    i = PRIME_LastInStr(p, GetPathSeparator())
     PRIME_DocDir = Left(p, i)
 End Function
 

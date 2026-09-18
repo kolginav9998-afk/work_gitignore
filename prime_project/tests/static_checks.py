@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Статические проверки финального ПОКАТАК_PRIME_2.0.0.ods (static_tests из ТЗ):
+Статические проверки финального ПОКАТАК_PRIME_2.0.1.ods (static_tests из ТЗ):
 - ODS валиден как ZIP, XML парсится
 - модули PRIME встроены в библиотеку Basic
 - манифест библиотеки скриптов валиден
@@ -24,12 +24,15 @@ import uno
 from com.sun.star.beans import PropertyValue
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+from build_ods import BUTTON_MAP, HIDE  # noqa: E402 - needs REPO_ROOT/tools on sys.path first
 
 EXPECTED_HIDDEN_SHEETS = [
     "SYS_PRIME_META", "SYS_PRIME_SEQ", "SYS_PRIME_TX",
     "DB_PRIME_PRODUCTS", "DB_PRIME_ALIASES", "DB_PRIME_PRODUCT_UNITS",
     "DB_PRIME_DOCUMENTS", "DB_PRIME_DOC_LINES", "DB_PRIME_MOVEMENTS",
     "DB_PRIME_LOTS", "DB_PRIME_ALLOCATIONS", "DB_PRIME_RETURNS",
+    "DB_PRIME_RETURN_ALLOCATIONS",
     "DB_PRIME_ORDER_SNAPSHOT", "DB_PRIME_KITS", "DB_PRIME_KIT_LINES",
     "DB_PRIME_ACTS", "DB_PRIME_AUDIT",
 ]
@@ -42,14 +45,31 @@ EXPECTED_ORDERS_BUSINESS_COLUMNS = [
     "Цена", "Сумма", "Покупатель", "Категория", "Подкатегория",
     "Место хранения", "Статус", "Контроль", "Комментарий",
     "Ожидаемая дата", "Назначение / проект", "Получено всего", "Осталось получить",
+    "В наличии сейчас", "Последний приход", "Дата последнего прихода",
 ]
 
 PRIME_MODULES = [f"PRIME_{n:02d}_{name}" for n, name in [
     (0, "Config"), (1, "Runtime"), (2, "Store"), (3, "Catalog"), (4, "Posting"),
     (5, "Orders"), (6, "Issues"), (7, "Workflows"), (8, "ReturnsInventory"),
     (9, "StockSearch"), (10, "ActsReports"), (11, "Kits"), (12, "UI"),
-    (13, "Diagnostics"), (14, "MigrationInstaller"),
+    (13, "Diagnostics"), (14, "MigrationInstaller"), (15, "Transfers"), (16, "Journal"),
 ]]
+
+# legacy_removal (PRIME 2.0.1): должен точно совпадать с tools/build_ods.py's LEGACY_MODULES_TO_REMOVE -
+# продублировано, а не импортировано, по тому же принципу, что и PRIME_MODULES выше (тест не должен
+# зависеть от импорта из tools/ модуля, требующего запущенный UNO-контекст на этапе импорта).
+LEGACY_MODULES_MUST_BE_ABSENT = [
+    "WMS_02_Orders_FINAL", "WMS_03_Issues_FINAL", "WMS_04_DB_Connection", "WMS_05_DB_Install",
+    "WMS_06_DB_Orders", "WMS_07_DB_Issues", "WMS_08_DB_Returns", "WMS_09_DB_Search",
+    "WMS_10_DB_Stock", "WMS_11_DB_UnitsLots", "WMS_12_DB_SmartReceipt", "WMS_13_SystemCenter",
+    "WMS_14_UniversalReceipt", "WMS_15_SafetyCore", "WMS_16_Acts", "WMS_17_ActIntegration",
+    "WMS_18_ActsRegistry", "WMS_19_ProductionUI", "WMS_20_ManualOperations", "WMS_21_Architecture",
+    "WMS_22_References", "WMS_23_ReturnsInventory", "WMS_24_GlobalSearch", "WMS_25_WorkflowActs",
+    "WMS_26_StabilityDiagnostics", "WMS_27_RuntimeCore", "WMS_28_DBEngine", "WMS_30_Integrity",
+    "WMS_31_UIEngine", "WMS_32_AdminReset", "WMS_33_OfflineExports", "WMS_34_ManagerReport",
+    "WMS_35_OrderExtras", "WMS_36_OrderImport", "WMS_37_PrimeUI", "WMS_38_Dashboard",
+    "WMS_99_Installer", "WMS_CORE_Common_FINAL",
+]
 
 failures = []
 passed = []
@@ -91,8 +111,19 @@ def zip_level_checks(ods_path: Path):
               "manifest doesn't need to list script-lb explicitly on all LO versions")
 
 
+def kill_stale_soffice(profile_dir: Path):
+    # xvfb-run wraps soffice.bin, so terminating the wrapper PID does not reliably kill the
+    # real soffice.bin child - it can linger and hold this profile dir, breaking a later run
+    # that reuses the same fixed path (observed empirically; see tools/build_ods.py's copy of
+    # this same guard for the full explanation).
+    import subprocess
+    subprocess.run(["pkill", "-9", "-f", f"soffice.bin.*{profile_dir}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
     import subprocess
+    kill_stale_soffice(profile_dir)
     if profile_dir.exists():
         import shutil
         shutil.rmtree(profile_dir)
@@ -132,6 +163,11 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             for mod in PRIME_MODULES:
                 check(f"module embedded: {mod}", lib.hasByName(mod))
 
+            # legacy_removal: production ODS must not embed any of the 38 legacy WMS_* modules.
+            still_present = [m for m in LEGACY_MODULES_MUST_BE_ABSENT if lib.hasByName(m)]
+            check("no legacy WMS_* modules embedded in production ODS", len(still_present) == 0,
+                  f"still embedded: {still_present}")
+
             # --- hidden PRIME tables exist ---
             for sh in EXPECTED_HIDDEN_SHEETS:
                 exists = doc.Sheets.hasByName(sh)
@@ -154,9 +190,45 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             else:
                 check("Заказы sheet exists", False)
 
+            # --- issues_migration / header_schema_registry (2.0.1): business sheets inherited
+            # from the 1.4.1 template must actually carry PRIME's column layout at their real
+            # header row, not the untouched legacy/decorative layout (2.0.0 defect - see
+            # docs/KNOWN_ISSUES.md history). One representative check per affected sheet.
+            EXPECTED_HEADER_SAMPLES = [
+                ("Выдачи", 0, ["№", "Код", "В наличии", "Кол-во", "После выдачи", "Назначение / проект"]),
+                # "Приход — Цех" - скрытый архив 1.4.1, но использует ту же общую
+                # PRIME_WorkflowReceiptColumns(), что и активные "Приход — ..." листы, поэтому
+                # разделяет их FINAL-схему (single_physical_warehouse) один в один.
+                ("Приход — Цех", 4, ["Дата", "Внутренний код", "Наименование", "Количество прихода", "Место хранения на складе"]),
+                # FINAL mega-task (single_physical_warehouse, forbidden_ui_terms): "Остаток
+                # офиса"/"Будет в офисе" удалены - контур не разбивает физический остаток на
+                # отдельные "склады", см. PRIME_00_Config.PRIME_WorkflowIssueColumns.
+                ("Расход — Офис", 4, ["Дата", "Внутренний код", "Место хранения", "Остаток позиции на складе", "Куда / назначение"]),
+                ("Возвраты", 4, ["Дата выдачи", "Код", "Осталось к возврату"]),
+                ("Инвентаризация", 4, ["Сессия", "Код", "Контур", "Учёт", "Факт"]),
+                ("Наличие", 5, ["Внутренний код", "Наименование", "Тип/источник", "Место хранения", "Остаток"]),
+                ("Остаток — Заказы", 4, ["ORDER_ID", "Код товара", "Текущий остаток партии"]),
+                ("Поиск", 5, ["Тип", "DOC_ID", "Код", "Подробности"]),
+                ("Перемещения", 0, ["Дата", "Внутренний код", "Место — откуда", "Место — куда"]),
+                ("Журнал", 0, ["DOC_ID", "OP_ID", "Тип", "Куда"]),
+                ("Комплекты", 0, ["KIT_ID", "Название", "PRODUCT_CODE"]),
+            ]
+            for sh_name, header_row, expected_cols in EXPECTED_HEADER_SAMPLES:
+                if not doc.Sheets.hasByName(sh_name):
+                    check(f"business sheet exists: {sh_name}", False)
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                cursor = sh.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                last_col = cursor.RangeAddress.EndColumn
+                row_headers = [sh.getCellByPosition(c, header_row).getString() for c in range(last_col + 1)]
+                missing = [c for c in expected_cols if c not in row_headers]
+                check(f"PRIME columns present at real header row: {sh_name}", len(missing) == 0,
+                      f"header row {header_row} missing {missing}, got {row_headers}")
+
             # --- sheet events reference existing PRIME macros ---
             event_sheets = ["Заказы", "Выдачи", "Приход — Цех", "Расход — Цех",
-                             "Приход — Офис", "Расход — Офис", "Возвраты"]
+                             "Приход — Офис", "Расход — Офис", "Возвраты", "Перемещения"]
             for sh_name in event_sheets:
                 if not doc.Sheets.hasByName(sh_name):
                     continue
@@ -191,9 +263,131 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             check("no working buttons reference WMSDB modules", wmsdb_bound == 0, f"{wmsdb_bound} buttons still call WMSDB*")
             check("buttons bound to PRIME macros", prime_bound > 0, f"count={prime_bound}")
 
+            # --- FINAL mega-task ui_cleanup: 0 forbidden wording / 0 duplicate-handler buttons on
+            # any authoritative visible sheet. Mirrors PRIME_12_UI.PRIME_UI_VisibleSheetNames.
+            VISIBLE_SHEETS_FOR_WORDING = [
+                "Главная", "Заказы", "Приход — Офис", "Расход — Офис",
+                "Приход — Производство", "Расход — Производство",
+                "Приход — Детали", "Расход — Детали", "Выдачи", "Возвраты",
+                "Перемещения", "Инвентаризация", "Наличие", "Поиск", "Журнал", "Комплекты",
+            ]
+            FORBIDDEN_WORDING = ["firebird", "поиск в базе", "база - поиск", "перенести в бд"]
+            forbidden_hits = []
+            for sh_name in VISIBLE_SHEETS_FOR_WORDING:
+                if not doc.Sheets.hasByName(sh_name):
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                cursor = sh.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                last_col = cursor.RangeAddress.EndColumn
+                last_row = cursor.RangeAddress.EndRow
+                for r in range(0, min(last_row, 30) + 1):
+                    for c in range(0, last_col + 1):
+                        text = sh.getCellByPosition(c, r).getString().lower()
+                        if not text:
+                            continue
+                        for term in FORBIDDEN_WORDING:
+                            if term in text:
+                                forbidden_hits.append(f"{sh_name}!R{r}C{c}: {term!r} in {text!r}")
+                forms = sh.DrawPage.Forms
+                for fi in range(forms.Count):
+                    form = forms.getByIndex(fi)
+                    for ci in range(form.Count):
+                        label = getattr(form.getByIndex(ci), "Label", "") or ""
+                        label_lower = label.lower()
+                        for term in FORBIDDEN_WORDING:
+                            if term in label_lower:
+                                forbidden_hits.append(f"{sh_name} button {form.getByIndex(ci).Name}: {term!r} in label {label!r}")
+            check("0 forbidden wording (Firebird/база) on visible sheets", len(forbidden_hits) == 0,
+                  f"found: {forbidden_hits}")
+
+            # --- 0 duplicate-handler buttons within any single visible sheet (ui_cleanup:
+            # remove_duplicate_buttons) - two buttons on the same sheet bound to the exact same
+            # PRIME macro confuse users about which one to click (e.g. the old "Новый заказ"/
+            # "Новый приход" pair, both PRIME_Orders_NewOrder).
+            duplicate_handlers = []
+            for sh_name in VISIBLE_SHEETS_FOR_WORDING:
+                if not doc.Sheets.hasByName(sh_name):
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                forms = sh.DrawPage.Forms
+                macro_to_ctrls = {}
+                for fi in range(forms.Count):
+                    form = forms.getByIndex(fi)
+                    for ci in range(form.Count):
+                        for e in form.getScriptEvents(ci):
+                            if ".PRIME_" in e.ScriptCode or "Standard.PRIME" in e.ScriptCode:
+                                macro_to_ctrls.setdefault(e.ScriptCode, []).append(form.getByIndex(ci).Name)
+                for macro, ctrls in macro_to_ctrls.items():
+                    if len(ctrls) > 1:
+                        duplicate_handlers.append(f"{sh_name}: {ctrls} all bound to {macro}")
+            check("0 duplicate-handler buttons on any visible sheet", len(duplicate_handlers) == 0,
+                  f"found: {duplicate_handlers}")
+
+            # --- post-review fix: obsolete controls (tools/build_ods.py's HIDE sentinel) must be
+            # PHYSICALLY ABSENT from the built document - not merely present-but-invisible.
+            # "Production ODS should contain no dead user controls": a hidden control that still
+            # exists in the form/DrawPage is still a dead control. Check every (sheet, control)
+            # pair mapped to HIDE in BUTTON_MAP genuinely has no surviving control model.
+            hide_pairs = [(sheet_name, ctrl_name) for (sheet_name, ctrl_name), target in BUTTON_MAP.items()
+                          if target is HIDE]
+            check("BUTTON_MAP has HIDE-mapped controls to verify", len(hide_pairs) > 0,
+                  "expected at least one HIDE-mapped control in BUTTON_MAP")
+            surviving_dead_controls = []
+            for sheet_name, ctrl_name in hide_pairs:
+                if not doc.Sheets.hasByName(sheet_name):
+                    continue  # sheet itself is gone - control cannot survive on it either
+                sh = doc.Sheets.getByName(sheet_name)
+                forms = sh.DrawPage.Forms
+                for fi in range(forms.Count):
+                    form = forms.getByIndex(fi)
+                    if form.hasByName(ctrl_name):
+                        surviving_dead_controls.append(f"{sheet_name}/{ctrl_name}")
+            check("0 surviving dead controls (removed, not merely hidden)", len(surviving_dead_controls) == 0,
+                  f"still present in the form: {surviving_dead_controls}")
+
+            # Also verify no leftover ControlShape on the DrawPage references one of these names -
+            # form.removeByName() alone could in principle leave an orphaned shape behind.
+            surviving_dead_shapes = []
+            for sheet_name, ctrl_name in hide_pairs:
+                if not doc.Sheets.hasByName(sheet_name):
+                    continue
+                sh = doc.Sheets.getByName(sheet_name)
+                draw_page = sh.DrawPage
+                for shape_idx in range(draw_page.Count):
+                    shape = draw_page.getByIndex(shape_idx)
+                    try:
+                        if shape.Control.Name == ctrl_name:
+                            surviving_dead_shapes.append(f"{sheet_name}/{ctrl_name}")
+                    except Exception:
+                        continue
+            check("0 surviving dead ControlShapes on DrawPage", len(surviving_dead_shapes) == 0,
+                  f"still present on DrawPage: {surviving_dead_shapes}")
+
             # --- normal runtime has no required ODB dependency: WMS_DATA_PORTABLE.odb not embedded/opened ---
             meta_sheet_exists = doc.Sheets.hasByName("SYS_PRIME_META")
             check("SYS_PRIME_META present (schema installed)", meta_sheet_exists)
+
+            # --- clean_release (FINAL mega-task, confirmed bug #8): a freshly built ODS (straight
+            # from the 1.4.1 template, no manual posting) must start with an EMPTY ledger - a
+            # plain schema install/migration never calls PRIME_PostDocument, so any row here would
+            # mean either a build step wrongly auto-posts something or a developer's manual test
+            # data leaked into this specific build. Business/reference sheets (Заказы, catalog)
+            # keep their real migrated 1.4.1 data - only the LEDGER tables must be empty.
+            ledger_sheets = ["DB_PRIME_DOCUMENTS", "DB_PRIME_DOC_LINES", "DB_PRIME_MOVEMENTS",
+                             "DB_PRIME_LOTS", "DB_PRIME_ALLOCATIONS", "DB_PRIME_RETURNS",
+                             "DB_PRIME_RETURN_ALLOCATIONS", "DB_PRIME_ACTS"]
+            non_empty_ledgers = []
+            for sh_name in ledger_sheets:
+                if not doc.Sheets.hasByName(sh_name):
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                cursor = sh.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                if cursor.RangeAddress.EndRow > 0:
+                    non_empty_ledgers.append(f"{sh_name} (last row {cursor.RangeAddress.EndRow})")
+            check("clean build: 0 documents/movements/lots/acts (no developer test data)",
+                  len(non_empty_ledgers) == 0, f"non-empty ledger sheets: {non_empty_ledgers}")
 
         finally:
             doc.close(False)
@@ -203,6 +397,7 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             proc.wait(timeout=15)
         except Exception:
             proc.kill()
+        kill_stale_soffice(profile_dir)
 
 
 def main():

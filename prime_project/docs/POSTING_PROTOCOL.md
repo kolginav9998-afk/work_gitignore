@@ -1,4 +1,4 @@
-# PRIME 2.0.0 — протокол проведения документов
+# PRIME 2.0.1 — протокол проведения документов
 
 Описывает РЕАЛЬНО реализованный протокол в `src/basic/PRIME_04_Posting.bas`
 (`PRIME_PostDocument`) — единственную функцию, которая пишет в `DB_PRIME_*`/`SYS_PRIME_TX`.
@@ -25,7 +25,8 @@ StarBasic на `UBound` поля-массива в `Type`). Документ с 
 ## 2. `PRIME_PostDocument` — пошаговый алгоритм (как реализовано)
 
 ```
-PRIME_TryEnter()                                    ' единый рантайм-лок на весь документ
+Если Not PRIME_TryEnter() Then                      ' 2.0.1: реальный boolean-мьютекс, не декорация
+    вернуть "" немедленно, ничего не писать, LastPostError = "операция уже выполняется"
 AuditLog(BUTTON_ENTER)
 On Error Goto PostFailed
   1. existingDoc = FindCommittedBySourceKey(SourceKey)
@@ -43,13 +44,21 @@ On Error Goto PostFailed
         TRANSFER    -> PostTransferLines    (2 движения на строку: -QTY на LocationFrom, +QTY на LocationTo)
         ADJUSTMENT  -> PostAdjustmentLines  (1 движение со знаком QtyBase)
   5. UpdateTxState(opId, COMMITTED)                                                [TX_COMMITTED]
-     RegisterCommittedKey(SourceKey, docId)         ' в памяти, кэш SOURCE_KEY->DOC_ID
+     RegisterCommittedKey(SourceKey, docId)         ' в памяти, кэш SOURCE_KEY->DOC_ID; committedKeyRegistered=True
   6. ThisComponent.store()                          ' один store() на весь документ
   7. Leave() ; вернуть docId
 PostFailed:
   Если TX-строка уже была записана -> UpdateTxState(opId, FAILED, errText)  (On Error Resume Next)
+  Если committedKeyRegistered -> UnregisterCommittedKey(SourceKey)    ' 2.0.1: см. §4
   AuditLog(ERROR) ; Leave() ; вернуть ""
 ```
+
+**Важно (2.0.1):** проверка `PRIME_TryEnter()` — это первое, что делает функция, и если лок уже
+занят (операция уже выполняется), функция **немедленно возвращается**, не доходя даже до
+`AuditLog(BUTTON_ENTER)` и не выполняя `PRIME_Leave()` (лок не был захвачен этим вызовом — снимать
+нечего). В 2.0.0 результат `PRIME_TryEnter()` не проверялся вовсе: функция всегда продолжала
+выполнение независимо от того, что вернул лок — то есть двойной клик/повторный вызов реально не
+блокировался. Это было найдено и исправлено при разборе для 2.0.1 (см. `CHANGELOG.md`).
 
 Каждый этап логируется в `DB_PRIME_AUDIT` через `PRIME_AuditLog` со стадией из
 `PRIME_00_Config` (`BUTTON_ENTER, VALIDATION_START, VALIDATION_OK, TX_PREPARED, DOCS_WRITTEN,
@@ -102,6 +111,14 @@ in-memory кэш `SOURCE_KEY -> DOC_ID`, построенный один раз 
 Повторный вызов с уже COMMITTED `SOURCE_KEY`: новых строк/движений не создаётся, возвращается
 существующий `DOC_ID`; вызывающая форма показывает "уже проведено" вместо повторного эффекта.
 
+**Согласованность кэша с реальным состоянием TX (2.0.1).** `PRIME_RegisterCommittedKey`
+вызывается на шаге 5 — ДО `ThisComponent.store()` на шаге 6. Если `store()` всё же провалится
+(диск, права доступа, файл занят), выполнение попадает в `PostFailed`, где TX корректно
+откатывается на `FAILED` — но до 2.0.1 запись в кэше `SOURCE_KEY -> DOC_ID` оставалась, как
+будто операция COMMITTED, и повторная попытка того же `SOURCE_KEY` получала "уже проведено"
+вместо шанса на повторную попытку. Теперь `PostFailed` вызывает `PRIME_UnregisterCommittedKey`,
+если регистрация успела произойти — кэш и `SYS_PRIME_TX` больше не расходятся.
+
 | Операция | SOURCE_KEY (формируется вызывающей формой) |
 |---|---|
 | Приход по заказу | ORDER_ID + ORDER_LINE_ID + номер поставки |
@@ -121,9 +138,14 @@ in-memory кэш `SOURCE_KEY -> DOC_ID`, построенный один раз 
 **Известное ограничение (честно, не заявляем как решённое):** строка `PREPARED` без
 последующего `COMMITTED`/`FAILED` (например, аварийное завершение LibreOffice между шагом 3 и
 5) не имеет автоматического механизма докрутки при следующем открытии — она остаётся в
-`SYS_PRIME_TX` как видимый диагностический след (не участвует в остатке — считается только
-`COMMITTED`), но её ручной или автоматический разбор ("crash recovery") в первом релизе не
-реализован. См. `KNOWN_ISSUES.md`.
+`SYS_PRIME_TX` как видимый диагностический след. С 2.0.1 то, что она **гарантированно не
+участвует в остатке**, — это не только формулировка в документации, а реально проверяемое
+поведение кода: `PRIME_LotBalance`/`PRIME_StockByLocation`/лист "Остаток" фильтруют движения по
+`PRIME_IsOpIdCommitted(OP_ID)` (кэш COMMITTED `OP_ID` в `PRIME_02_Store`, перестраивается из
+`SYS_PRIME_TX`). В 2.0.0 этот фильтр отсутствовал в коде — все движения суммировались независимо
+от состояния транзакции, то есть "не участвует в остатке" было декларацией, а не фактом; это и
+было исправлено. Ручной или автоматический разбор зависшей `PREPARED`-записи ("crash recovery")
+по-прежнему не реализован. См. `KNOWN_ISSUES.md`.
 
 ## 6. Один `store()`
 
