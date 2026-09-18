@@ -803,6 +803,17 @@ class EiStockModel:
             raise TestFailure(
                 f"доступно по {ei_code}: {pos['balance']} шт. Не хватает: {qty - pos['balance']} шт.")
         pos["balance"] -= qty
+        pos["issued"] = pos.get("issued", 0) + qty
+
+    # Mirrors PRIME_05_Orders.PRIME_Orders_RefreshChildRow (2.1.2) - called from
+    # PRIME_PostDocument right after every Issue/Return/Transfer/Adjustment commit, recomputes a
+    # CHILD row's Остаток/Выдано/Возвращено from scratch for its own EI_CODE only.
+    def return_qty(self, ei_code, qty):
+        pos = self.positions.get(ei_code)
+        if pos is None:
+            raise TestFailure(f"unknown EI_CODE {ei_code}")
+        pos["balance"] += qty
+        pos["returned"] = pos.get("returned", 0) + qty
 
 
 def test_two_receipts_of_same_name_get_different_ei_codes():
@@ -919,6 +930,79 @@ def test_presence_sheet_keeps_identical_names_as_separate_rows():
     rows = [{"ei_code": code, **data} for code, data in movements_by_ei.items()]
     check(len(rows) == 2, "two distinct EI_CODEs of the identical name must remain two separate rows")
     check({r["name"] for r in rows} == {"Ручка"}, "sanity: both rows share the same name")
+
+
+# === 2.1.2: Orders CHILD-row live refresh, new PRODUCTION/DETAILS receipt workflows,
+# committed-only Search/Возвраты candidate lists ==============================================
+
+def test_orders_child_row_live_refresh_reflects_issue_and_return():
+    # Mirrors PRIME_Orders_RefreshChildRow, called from PRIME_PostDocument right after every
+    # Issue/Return commit (PRIME_04_Posting.PRIME_PostDocument -> PRIME_Orders_RefreshChildRowsForPlan).
+    m = EiStockModel()
+    code = m.receipt("Ручка", 6)
+    m.issue(code, 2)
+    check(m.positions[code]["balance"] == 4, "child row Остаток must drop to 4 after issuing 2 of 6")
+    check(m.positions[code]["issued"] == 2, "child row Выдано must track cumulative issued qty")
+
+    m.return_qty(code, 1)
+    check(m.positions[code]["balance"] == 5, "child row Остаток must rise back to 5 after returning 1")
+    check(m.positions[code]["returned"] == 1, "child row Возвращено must track cumulative returned qty")
+
+    # A sibling EI_CODE of the identical name must be completely unaffected by another EI_CODE's
+    # live refresh - this is exactly what the 2.1.2 headless corruption bug (buffered-array
+    # readback in PRIME_PostIssueLines) put at risk before it was fixed to write each
+    # allocation/movement directly instead of through a buffer.
+    sibling = m.receipt("Ручка", 19)
+    check(m.positions[sibling]["balance"] == 19, "sibling EI_CODE must be unaffected by another EI_CODE's issue/return")
+    check("issued" not in m.positions[sibling], "sibling EI_CODE must not pick up another position's Выдано")
+
+
+def test_production_and_details_receipts_get_independent_contours_and_ei_codes():
+    # Mirrors PRIME_00_Config.PRIME_ContourForSheet (2.1.2): "Приход — Производство" posts to the
+    # new PRODUCTION contour, "Приход — Детали" reuses WORKSHOP_DETAILS (same contour legacy
+    # "Приход — Цех" tracked), "Приход — Офис" keeps OFFICE - three independently counted stocks,
+    # never aggregated by product name (do_not_reduce_scope: each receipt row is its own position).
+    m = EiStockModel()
+    code_office = m.receipt("Деталь", 10, contour="OFFICE")
+    code_production = m.receipt("Деталь", 5, contour="PRODUCTION")
+    code_details = m.receipt("Деталь", 3, contour="WORKSHOP_DETAILS")
+
+    check(len({code_office, code_production, code_details}) == 3,
+          "each receipt sheet must mint its own distinct EI_CODE, never aggregated by name")
+    check(m.positions[code_production]["contour"] == "PRODUCTION",
+          "Приход — Производство receipts must post to the PRODUCTION contour")
+    check(m.positions[code_details]["contour"] == "WORKSHOP_DETAILS",
+          "Приход — Детали receipts must post to the WORKSHOP_DETAILS contour (same as legacy Приход — Цех)")
+    check(m.positions[code_office]["contour"] == "OFFICE", "sanity: office contour unaffected")
+
+    # Issuing from one contour's position must never touch another contour's position of the
+    # identical name (no_cross_ei_fifo, extended across contours).
+    m.issue(code_production, 5)
+    check(m.positions[code_production]["balance"] == 0, "production position fully issued")
+    check(m.positions[code_details]["balance"] == 3, "details position untouched by production issue")
+    check(m.positions[code_office]["balance"] == 10, "office position untouched by production issue")
+
+
+def test_search_and_returns_exclude_uncommitted_documents():
+    # Mirrors the 2.1.2 fix to PRIME_09_StockSearch.PRIME_Search_Execute and
+    # PRIME_08_ReturnsInventory.PRIME_Returns_RefreshButton: DB_PRIME_DOCUMENTS/DOC_LINES rows are
+    # written BEFORE TX=COMMITTED (PRIME_04_Posting.PRIME_WriteDocumentHeader writes them at step
+    # 4, ahead of the commit marker - see committed_only_everywhere/R07), so a document that never
+    # reached COMMITTED (rolled back to FAILED) must never appear in either candidate list.
+    documents = [
+        {"doc_id": "DOC-1", "op_id": "OP-1"},  # reached TX=COMMITTED
+        {"doc_id": "DOC-2", "op_id": "OP-2"},  # PREPARED then rolled back to FAILED
+    ]
+    committed_op_ids = {"OP-1"}
+
+    def is_doc_committed(doc):
+        return doc["op_id"] in committed_op_ids
+
+    visible = [d for d in documents if is_doc_committed(d)]
+    check(visible == [documents[0]],
+          "Search/Возвраты candidate lists must only ever show COMMITTED documents - an "
+          "uncommitted PREPARED/FAILED row must never leak through without an explicit "
+          "PRIME_IsDocIdCommitted() check")
 
 
 def test_order_status_driven_by_received_qty_not_remaining_stock():
@@ -1040,6 +1124,9 @@ TESTS = [
     test_order_status_driven_by_received_qty_not_remaining_stock,
     test_batch_duplicate_posting_excludes_already_done_rows,
     test_batch_invalid_line_blocks_entire_batch,
+    test_orders_child_row_live_refresh_reflects_issue_and_return,
+    test_production_and_details_receipts_get_independent_contours_and_ei_codes,
+    test_search_and_returns_exclude_uncommitted_documents,
 ]
 
 

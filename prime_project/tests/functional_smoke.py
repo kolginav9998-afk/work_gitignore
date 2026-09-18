@@ -157,17 +157,17 @@ def main():
         except Exception as e:
             failures.append(f"PRIME_Stock_ShowAllButton raised: {e!r}")
 
-        stock_sheet = doc.Sheets.getByName(u"Остаток")
+        stock_sheet = doc.Sheets.getByName(u"Наличие")
         st_cursor = stock_sheet.createCursor()
         st_cursor.gotoEndOfUsedArea(False)
         st_last_row = st_cursor.RangeAddress.EndRow
         found_stock_row = False
         if st_last_row >= 1 and product_code:
-            col_stock_code = header_index(u"Остаток", u"Код")
-            col_stock_qty = header_index(u"Остаток", u"Остаток")
+            col_stock_code = header_index(u"Наличие", u"Код")
+            col_stock_qty = header_index(u"Наличие", u"Остаток")
             for r in range(1, st_last_row + 1):
-                if cell(u"Остаток", col_stock_code, r) == product_code:
-                    qty = cell(u"Остаток", col_stock_qty, r)
+                if cell(u"Наличие", col_stock_code, r) == product_code:
+                    qty = cell(u"Наличие", col_stock_qty, r)
                     if qty == "10":
                         found_stock_row = True
                     else:
