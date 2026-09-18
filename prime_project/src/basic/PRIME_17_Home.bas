@@ -169,6 +169,20 @@ Public Sub PRIME_Home_GoReceiptDetails()
     PRIME_Home_GoTo(SH_RECEIPT_DETAILS)
 End Sub
 
+' FINAL mega-task: main_sheet.navigation_buttons включает все 3 листа "Расход — ..." наравне с
+' "Приход — ..." (single_physical_warehouse - расход теперь такой же активный экран, как приход).
+Public Sub PRIME_Home_GoIssueOffice()
+    PRIME_Home_GoTo(SH_ISSUE_OFFICE)
+End Sub
+
+Public Sub PRIME_Home_GoIssueProduction()
+    PRIME_Home_GoTo(SH_ISSUE_PRODUCTION)
+End Sub
+
+Public Sub PRIME_Home_GoIssueDetails()
+    PRIME_Home_GoTo(SH_ISSUE_DETAILS)
+End Sub
+
 Public Sub PRIME_Home_GoIssues()
     PRIME_Home_GoTo(SH_ISSUES)
 End Sub

@@ -81,12 +81,19 @@ PRIME_MODULES = [
 # push-button контролы поверх декоративной шапки листа (строка 1, под заголовком/описанием) и
 # сразу привязываются к соответствующему PRIME-макросу - см. create_new_sheet_buttons().
 NEW_SHEET_BUTTONS = {
+    # FINAL mega-task main_sheet.navigation_buttons: все 3 "Расход — ..." добавлены рядом со
+    # своими "Приход — ..." (single_physical_warehouse - расход такой же активный экран, как
+    # приход, никаких отдельных "складов"). 16 кнопок всего - ровно 4 полных ряда по
+    # NEW_SHEET_BUTTON_COLS["Главная"]=4.
     "Главная": [
         ("Обновить", "Standard.PRIME_17_Home.PRIME_Home_RefreshButton"),
         ("Заказы", "Standard.PRIME_17_Home.PRIME_Home_GoOrders"),
         ("Приход — Офис", "Standard.PRIME_17_Home.PRIME_Home_GoReceiptOffice"),
+        ("Расход — Офис", "Standard.PRIME_17_Home.PRIME_Home_GoIssueOffice"),
         ("Приход — Производство", "Standard.PRIME_17_Home.PRIME_Home_GoReceiptProduction"),
+        ("Расход — Производство", "Standard.PRIME_17_Home.PRIME_Home_GoIssueProduction"),
         ("Приход — Детали", "Standard.PRIME_17_Home.PRIME_Home_GoReceiptDetails"),
+        ("Расход — Детали", "Standard.PRIME_17_Home.PRIME_Home_GoIssueDetails"),
         ("Выдачи", "Standard.PRIME_17_Home.PRIME_Home_GoIssues"),
         ("Наличие", "Standard.PRIME_17_Home.PRIME_Home_GoStock"),
         ("Возвраты", "Standard.PRIME_17_Home.PRIME_Home_GoReturns"),
@@ -120,6 +127,8 @@ SHEET_EVENT_HANDLERS = {
     "Расход — Офис": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Приход — Производство": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Приход — Детали": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
+    "Расход — Производство": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
+    "Расход — Детали": "Standard.PRIME_07_Workflows.PRIME_OnContentChanged_Workflow",
     "Возвраты": "Standard.PRIME_08_ReturnsInventory.PRIME_OnContentChanged_Returns",
     "Перемещения": "Standard.PRIME_15_Transfers.PRIME_OnContentChanged_Transfers",
 }
@@ -147,6 +156,13 @@ SHEET_EVENT_HANDLERS = {
 # поведение защищённого read-only листа, а не незакрытый долг.
 HIDE = None
 ARCHIVE_STUB = "Standard.PRIME_12_UI.PRIME_Legacy_ArchiveStub"
+
+# (sheet, template control name) -> new visible caption. Only for pre-existing 1.4.1 template
+# controls that are being repurposed for a different meaning than their original 1.4.1 label -
+# see the "Из заказов" comment next to WMS_STOCK_SEARCH in BUTTON_MAP above.
+RELABEL_MAP = {
+    ("Наличие", "WMS_STOCK_SEARCH"): "Из заказов",
+}
 
 BUTTON_MAP = {
     # Инфо
@@ -188,15 +204,23 @@ BUTTON_MAP = {
     ("Выдачи", "WMS_ISS_BTN_RETURN"): HIDE,
     ("Выдачи", "WMS_ISS_BTN_LOOKUP"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
     ("Выдачи", "WMS_ISS_BTN_BULKFILL"): "Standard.PRIME_06_Issues.PRIME_Issues_FillAllByCodeButton",
-    # Наличие (2.1.0, было "Остаток" - см. PRIME_Migration_RenameStockToNalichie)
+    # Наличие (2.1.0, было "Остаток" - см. PRIME_Migration_RenameStockToNalichie). FINAL
+    # mega-task (critical_fix, confirmed bug #3): "Из производства"/"Из офиса"/"Детали" были
+    # привязаны к контуру (WMS_STOCK_PROD реально показывал SC_GENERAL, а не производство) -
+    # переведены на фильтр по происхождению EI (PRIME_Stock_ShowOrigin*Button, см.
+    # PRIME_09_StockSearch). Labels в самом шаблоне 1.4.1 уже "Из офиса"/"Из производства"/
+    # "Детали" - совпадают со stock_and_presence.quick_filters один в один, меняется только
+    # обработчик. WMS_STOCK_SEARCH дублировал WMS_STOCK_HISTORY (тот же PRIME_Search_RunButton,
+    # ui_cleanup: remove_duplicate_buttons) - переиспользован под недостающий фильтр
+    # "Из заказов" (см. RELABEL_MAP ниже, меняет подпись кнопки на "Из заказов").
     ("Наличие", "WMS_STOCK_ALL"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowAllButton",
-    ("Наличие", "WMS_STOCK_OFFICE"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowContourOfficeButton",
-    ("Наличие", "WMS_STOCK_PROD"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowContourGeneralButton",
-    ("Наличие", "WMS_STOCK_PARTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowContourWorkshopButton",
+    ("Наличие", "WMS_STOCK_OFFICE"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowOriginOfficeButton",
+    ("Наличие", "WMS_STOCK_PROD"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowOriginProductionButton",
+    ("Наличие", "WMS_STOCK_PARTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowOriginDetailsButton",
     ("Наличие", "WMS_STOCK_NEG"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowNegativeButton",
     ("Наличие", "WMS_STOCK_HISTORY"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
     ("Наличие", "WMS_STOCK_LOTS"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowLotsByCodeButton",
-    ("Наличие", "WMS_STOCK_SEARCH"): "Standard.PRIME_09_StockSearch.PRIME_Search_RunButton",
+    ("Наличие", "WMS_STOCK_SEARCH"): "Standard.PRIME_09_StockSearch.PRIME_Stock_ShowOriginOrdersButton",
     ("Наличие", "WMS_STOCK_DIAG"): "Standard.PRIME_13_Diagnostics.PRIME_Diagnostics_RunButton",
     # Поиск (2.1.2: переименован из "База - Поиск" ДО этой стадии сборки - см.
     # PRIME_14_MigrationInstaller.PRIME_Migration_RenameSearchToPoisk, вызывается раньше в
@@ -243,19 +267,19 @@ BUTTON_MAP = {
     ("Остаток — Заказы", "WMS_OXS_1"): "Standard.PRIME_09_StockSearch.PRIME_StockOrders_RefreshButton",
 }
 
-# Активные workflow-листы получают единый обработчик. 2.1.2 (авторитетный список видимых листов
-# master task): "Приход — Производство"/"Приход — Детали" перестают быть архивом истории и
-# становятся активными receipt-листами (собственный EI_CODE на строку, контур PRODUCTION/
-# WORKSHOP_DETAILS - см. PRIME_00_Config.PRIME_ContourForSheet) - их кнопки получают реальные
-# PRIME-макросы, как у Приход — Офис. "Расход — Производство"/"Расход — Детали" активного
-# двойника не получают (нет в авторитетном списке) - получают явный "архив истории" стаб на
-# каждой кнопке (см. комментарий у HIDE выше - это осознанное read-only поведение защищённого
-# архивного листа, а не незакрытый долг).
+# Активные workflow-листы получают единый обработчик. FINAL mega-task: single_physical_warehouse -
+# "Расход — Производство"/"Расход — Детали" перестают быть архивом истории 1.4.1 (как и
+# "Приход — Производство"/"Приход — Детали" стали активными в 2.1.2) и становятся полноценными
+# активными issue-листами того же engine, что и "Расход — Офис"/"Выдачи" - см.
+# PRIME_00_Config.SH_ISSUE_PRODUCTION/SH_ISSUE_DETAILS и PRIME_07_Workflows.
+# "Приход/Расход — Цех" остаются в списке ради работающих кнопок на случай исторических данных на
+# скрытом архивном листе (сам лист исключён из авторитетного видимого списка - см.
+# PRIME_12_UI.PRIME_UI_VisibleSheetNames), но НЕ являются активным пользовательским экраном.
 ACTIVE_WORKFLOW_SHEETS = [
     "Приход — Цех", "Расход — Цех", "Приход — Офис", "Расход — Офис",
     "Приход — Производство", "Приход — Детали",
+    "Расход — Производство", "Расход — Детали",
 ]
-LEGACY_WORKFLOW_SHEETS = ["Расход — Производство", "Расход — Детали"]
 WORKFLOW_BUTTON_NAMES = {
     "WMS_WF_ROW": "Standard.PRIME_07_Workflows.PRIME_Workflow_ConductRowButton",
     "WMS_WF_ALL": "Standard.PRIME_07_Workflows.PRIME_Workflow_ConductAllButton",
@@ -268,9 +292,14 @@ WORKFLOW_BUTTON_NAMES = {
 for _sheet in ACTIVE_WORKFLOW_SHEETS:
     for _ctrl, _macro in WORKFLOW_BUTTON_NAMES.items():
         BUTTON_MAP[(_sheet, _ctrl)] = _macro
-for _sheet in LEGACY_WORKFLOW_SHEETS:
-    for _ctrl in WORKFLOW_BUTTON_NAMES:
-        BUTTON_MAP[(_sheet, _ctrl)] = ARCHIVE_STUB
+
+# confirmed bug #5 (forbidden_wording): every active workflow sheet's WMS_WF_SEARCH button is
+# labelled "Поиск в базе" in the 1.4.1 template - same forbidden "база" wording as the old
+# "База - Поиск" sheet name (already fixed - see PRIME_14_MigrationInstaller.
+# PRIME_Migration_RenameSearchToPoisk). The macro binding was already correct
+# (PRIME_Search_RunButton); only the caption was stale.
+for _sheet in ACTIVE_WORKFLOW_SHEETS:
+    RELABEL_MAP[(_sheet, "WMS_WF_SEARCH")] = "Поиск"
 
 
 def make_prop(name, value):
@@ -394,6 +423,8 @@ def rebind_buttons(doc):
             for ctrl_idx in range(form.Count):
                 ctrl = form.getByIndex(ctrl_idx)
                 key = (sheet.Name, ctrl.Name)
+                if key in RELABEL_MAP:
+                    ctrl.Label = RELABEL_MAP[key]
                 if key not in BUTTON_MAP:
                     continue
                 target = BUTTON_MAP[key]
@@ -567,6 +598,12 @@ def build(template: Path, output: Path, port: int, profile_dir: Path, run_migrat
 
         print("Applying PRIME UI layout (separate invoke) ...")
         invoke_macro(doc, "Standard.PRIME_12_UI.PRIME_UI_RestoreInterfaceSilent")
+
+        # confirmed bug #4: called as its OWN top-level invoke() - see the empirically-documented
+        # "chained structural ops within one invoke() silently no-op past the first" gotcha
+        # explained in the big comment above (EnsureSchema/EnsureBusinessSheet history).
+        print("Fixing 'Наличие' panel text (separate invoke) ...")
+        invoke_macro(doc, "Standard.PRIME_12_UI.PRIME_UI_FixStockPanelTextButton")
 
         print("Binding PRIME_OnContentChanged_* sheet events (OnChange) ...")
         bind_sheet_events(doc)

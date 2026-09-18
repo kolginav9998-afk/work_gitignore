@@ -437,17 +437,19 @@ Private Function PRIME_ValidateTransfer(ByRef plan As PrimeDocPlan, ByRef errMsg
         End If
         plan.Lines(i).QtyBase = CDbl(baseQty)
 
-        If plan.Lines(i).ContourFrom = plan.Lines(i).ContourTo And plan.Lines(i).LocationFrom = plan.Lines(i).LocationTo Then
-            errMsg = "Строка " & (i + 1) & ": место и контур назначения совпадают с исходными - перемещение не имеет смысла."
+        ' transfers.rule (FINAL, single_physical_warehouse): контур больше не участвует в проверке -
+        ' единственная физическая граница перемещения внутри одного склада - LOCATION.
+        If plan.Lines(i).LocationFrom = plan.Lines(i).LocationTo Then
+            errMsg = "Строка " & (i + 1) & ": место назначения совпадает с исходным - перемещение не имеет смысла."
             PRIME_ValidateTransfer = False
             Exit Function
         End If
 
         Dim key As String
-        key = plan.Lines(i).ProductCode & "|" & plan.Lines(i).LocationFrom & "|" & plan.Lines(i).ContourFrom
+        key = plan.Lines(i).ProductCode & "|" & plan.Lines(i).LocationFrom
 
         Dim available As Double
-        available = PRIME_LocationContourBalance(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, plan.Lines(i).ContourFrom)
+        available = PRIME_LocationContourBalance(plan.Lines(i).ProductCode, plan.Lines(i).LocationFrom, "")
 
         Dim alreadyReservedInPlan As Variant
         If Not PRIME_CollectionTryGet(reserved, key, alreadyReservedInPlan) Then alreadyReservedInPlan = 0#
@@ -455,8 +457,8 @@ Private Function PRIME_ValidateTransfer(ByRef plan As PrimeDocPlan, ByRef errMsg
         Dim remaining As Double
         remaining = available - CDbl(alreadyReservedInPlan)
         If remaining < plan.Lines(i).QtyBase - 0.0000005 Then
-            errMsg = "Строка " & (i + 1) & ": на месте """ & plan.Lines(i).LocationFrom & """ (" & _
-                PRIME_ContourDisplayName(plan.Lines(i).ContourFrom) & ") недостаточно остатка для перемещения (доступно " & remaining & ")."
+            errMsg = "Строка " & (i + 1) & ": на месте """ & plan.Lines(i).LocationFrom & _
+                """ недостаточно остатка для перемещения (доступно " & remaining & ")."
             PRIME_ValidateTransfer = False
             Exit Function
         End If
@@ -1082,6 +1084,14 @@ Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String,
                 Dim srcReceiptDate As String
                 srcReceiptDate = PRIME_GetLotField(lots(j), "RECEIPT_DATE")
                 If srcReceiptDate = "" Then srcReceiptDate = plan.DocDate
+                ' transfers.rule (FINAL): перемещение меняет ТОЛЬКО location. Источник происхождения
+                ' EI (заказ/офис/производство/детали) обязан сохраняться - наследуем ORIGIN и
+                ' STOCK_CONTOUR исходной партии, а не пишем искусственный "TRANSFER"/ContourTo.
+                Dim srcOrigin As String
+                srcOrigin = PRIME_GetLotField(lots(j), "ORIGIN")
+                If srcOrigin = "" Then srcOrigin = "TRANSFER"
+                Dim srcOrderId As String
+                srcOrderId = PRIME_GetLotField(lots(j), "ORDER_ID")
 
                 oLotSheet.getCellByPosition(colLotId, lotRow).setString(destLotId)
                 oLotSheet.getCellByPosition(colLotProduct, lotRow).setString(plan.Lines(i).ProductCode)
@@ -1091,9 +1101,9 @@ Private Sub PRIME_PostTransferLines(ByVal docId As String, ByVal opId As String,
                 oLotSheet.getCellByPosition(colLotLoc, lotRow).setString(plan.Lines(i).LocationTo)
                 oLotSheet.getCellByPosition(colLotOrigQty, lotRow).setValue(take)
                 oLotSheet.getCellByPosition(colLotUnit, lotRow).setString(PRIME_GetProductField(plan.Lines(i).ProductCode, "BASE_UNIT"))
-                oLotSheet.getCellByPosition(colLotOrigin, lotRow).setString("TRANSFER")
-                oLotSheet.getCellByPosition(colLotOrderId, lotRow).setString("")
-                If colLotContour >= 0 Then oLotSheet.getCellByPosition(colLotContour, lotRow).setString(plan.Lines(i).ContourTo)
+                oLotSheet.getCellByPosition(colLotOrigin, lotRow).setString(srcOrigin)
+                oLotSheet.getCellByPosition(colLotOrderId, lotRow).setString(srcOrderId)
+                If colLotContour >= 0 Then oLotSheet.getCellByPosition(colLotContour, lotRow).setString(PRIME_GetLotField(lots(j), "STOCK_CONTOUR"))
                 If colLotParent >= 0 Then oLotSheet.getCellByPosition(colLotParent, lotRow).setString(lots(j))
                 lotRow = lotRow + 1
 
@@ -1255,9 +1265,14 @@ Private Function PRIME_BuildMovementRow(ByVal headers As Variant, ByVal docId As
 End Function
 
 ' === FIFO / остатки по партиям =================================================================
-' R02 (2.1.0): партии товара строго на конкретном (месте, контуре), отсортированные по дате
-' прихода и LOT_ID (fifo.sort_order), с текущим балансом (сумма COMMITTED-движений). Только
-' партии с положительным балансом полезны для списания, но возвращаем все для прозрачности.
+' single_physical_warehouse (FINAL): один физический склад - Заказы/Офис/Производство/Детали
+' это МЕТКА ИСТОЧНИКА на партии (DB_PRIME_LOTS.ORIGIN/STOCK_CONTOUR), а не отдельный физический
+' остаток. Контур/источник НИКОГДА не сужает физическую доступность EI_CODE - единственная
+' реальная граница остатка внутри склада - место хранения. Параметр contour сохранён в
+' сигнатуре ради обратной совместимости существующих вызывающих (много мест уже передают
+' контур листа), но с этого прохода полностью ИГНОРИРУЕТСЯ как фильтр партий - раньше здесь
+' была ветка "contour="" - без фильтра, иначе - строго один контур"; теперь фильтра по контуру
+' нет вообще ни при каком значении параметра.
 Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByVal location As String, ByVal contour As String, ByRef lots() As String, ByRef balances() As Double)
     If Not PRIME_SheetExists(SH_DB_LOTS) Then
         ReDim lots(-1) : ReDim balances(-1)
@@ -1291,11 +1306,9 @@ Public Sub PRIME_FifoLotsForProduct(ByVal productCode As String, ByVal location 
     For i = 1 To UBound(lotTable)
         If CStr(lotTable(i)(colCode)) = productCode Then
             If location = "" Or CStr(lotTable(i)(colLoc)) = location Then
-                If contour = "" Or colContour < 0 Or CStr(lotTable(i)(colContour)) = contour Then
-                    candLots(n) = CStr(lotTable(i)(colLotId))
-                    candDates(n) = CStr(lotTable(i)(colDate))
-                    n = n + 1
-                End If
+                candLots(n) = CStr(lotTable(i)(colLotId))
+                candDates(n) = CStr(lotTable(i)(colDate))
+                n = n + 1
             End If
         End If
     Next i
@@ -1369,8 +1382,10 @@ Public Function PRIME_LotBalance(ByVal lotId As String) As Double
     PRIME_LotBalance = total
 End Function
 
-' R02: остаток строго по (товар, место, контур) - сумма балансов партий, попадающих под эти
-' три ключа. Единственный источник правды для проверки доступности при ISSUE/TRANSFER.
+' single_physical_warehouse (FINAL): остаток по (товар, место) - контур больше не сужает
+' физическую доступность (см. комментарий у PRIME_FifoLotsForProduct), параметр сохранён в
+' сигнатуре ради вызывающих. Единственный источник правды для проверки доступности при
+' ISSUE/TRANSFER/расходных листах.
 Public Function PRIME_LocationContourBalance(ByVal productCode As String, ByVal location As String, ByVal contour As String) As Double
     Dim lots() As String
     Dim balances() As Double

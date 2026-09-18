@@ -77,8 +77,10 @@ CleanExit:
 End Sub
 
 ' R23 (2.1.0): "В наличии" -> "Кол-во" -> "После выдачи" - представление того же
-' COMMITTED-ledger, что и лист "Наличие" (контур всегда SC_GENERAL - Выдачи работают только со
-' складом), пересчитывается при вводе кода товара и количества.
+' COMMITTED-ledger, что и лист "Наличие". single_physical_warehouse (FINAL): один физический
+' склад - "Выдачи" обязаны разрешать ЛЮБОЙ валидный EI_CODE независимо от того, пришёл он по
+' Заказам, из Офиса, из Производства или как Деталь - контур больше не сужает физическую
+' доступность (см. PRIME_04_Posting.PRIME_LocationContourBalance).
 Private Sub PRIME_Issues_RefreshInlineStock(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
     Dim colAvail As Long, colAfter As Long, colCode As Long, colFrom As Long, colQty As Long
     colAvail = PRIME_ColIndex(headers, "В наличии")
@@ -96,7 +98,7 @@ Private Sub PRIME_Issues_RefreshInlineStock(ByVal oSheet As Object, ByVal header
     loc = ""
     If colFrom >= 0 Then loc = Trim(oSheet.getCellByPosition(colFrom, row).getString())
     Dim available As Double
-    available = PRIME_LocationContourBalance(code, loc, SC_GENERAL)
+    available = PRIME_LocationContourBalance(code, loc, "")
     If colAvail >= 0 Then oSheet.getCellByPosition(colAvail, row).setValue(available)
 
     If colAfter >= 0 Then

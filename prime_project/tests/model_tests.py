@@ -448,26 +448,36 @@ def test_committed_op_id_cache_updates_immediately_after_post():
           "without waiting for a full cache rebuild")
 
 
-# --- R02: FIFO/availability must be scoped to (product, location, contour), not product alone ---
+# --- R02 (superseded by FINAL mega-task, single_physical_warehouse): FIFO/availability is scoped
+# to (product, location) - contour is inert metadata (source/destination tag), never a physical
+# partition. Originally (2.1.0) this scoped by (product, location, contour); the FINAL mega-task
+# explicitly reverses that: "Офис, Производство, Детали и Заказы - НЕ отдельные склады и не
+# отдельные физические остатки" - see PRIME_04_Posting.PRIME_FifoLotsForProduct, which now ignores
+# its contour parameter entirely. Availability is still scoped to LOCATION (the one real physical
+# boundary), just not to contour on top of it.
 def location_contour_balance(lots, product_code, location, contour):
-    return sum(bal for (pc, loc, ctr, _date, bal) in lots
-               if pc == product_code and loc == location and ctr == contour)
+    # contour kept in the signature for call-site compatibility with older callers in this file,
+    # but intentionally unused - see module comment above.
+    return sum(bal for (pc, loc, _ctr, _date, bal) in lots
+               if pc == product_code and loc == location)
 
 
-def test_fifo_is_location_and_contour_scoped():
+def test_fifo_is_location_scoped_but_not_contour_partitioned():
     lots = [
         ("P1", "A", "GENERAL", "2026-01-01", 2.0),
         ("P1", "B", "GENERAL", "2026-01-01", 20.0),
         ("P1", "A", "WORKSHOP_DETAILS", "2026-01-01", 100.0),  # same product+location, different contour
     ]
-    # Availability at A/GENERAL must be exactly 2, not the product-wide total across all
-    # locations/contours (22 general + 100 workshop) - this is exactly the bug the external
-    # audit found: "issue from A checks the PRODUCT's total stock, not A's own stock."
-    check(location_contour_balance(lots, "P1", "A", "GENERAL") == 2.0,
-          "availability must be scoped to the exact (product, location, contour), not product-wide")
-    check(location_contour_balance(lots, "P1", "B", "GENERAL") == 20.0, "sanity check on B/GENERAL")
-    check(location_contour_balance(lots, "P1", "A", "WORKSHOP_DETAILS") == 100.0,
-          "same product+location but a different contour must be a completely separate bucket")
+    # Availability at location A must be the sum of BOTH lots physically stored there (2 + 100),
+    # regardless of their differing contour tags - single_physical_warehouse: contour never
+    # partitions the physical balance. LOCATION remains the only real physical boundary, so B's
+    # stock must stay excluded.
+    check(location_contour_balance(lots, "P1", "A", "GENERAL") == 102.0,
+          "availability at a location must pool ALL contours physically stored there (2 + 100)")
+    check(location_contour_balance(lots, "P1", "B", "GENERAL") == 20.0,
+          "a different LOCATION must still be excluded - location remains the one real physical boundary")
+    check(location_contour_balance(lots, "P1", "A", "WORKSHOP_DETAILS") == 102.0,
+          "the contour argument passed in must not change the result - contour is inert metadata")
 
 
 # --- R10: lines of the same product within one document must reserve stock against each other ---
@@ -1101,7 +1111,7 @@ TESTS = [
     test_order_status_overdue_rules,
     test_order_status_respects_manual_cancellation,
     test_committed_op_id_cache_updates_immediately_after_post,
-    test_fifo_is_location_and_contour_scoped,
+    test_fifo_is_location_scoped_but_not_contour_partitioned,
     test_multiline_document_reservation_rejects_whole_batch_when_insufficient,
     test_transfer_preserves_lot_lineage_and_fifo_age,
     test_inventory_adjustment_keeps_stock_equal_to_sum_of_lots,

@@ -268,12 +268,15 @@ End Function
 ' --- Местоположение с положительным остатком (для автоподстановки "Откуда" в Выдачах) ---
 ' location_rule: подставить, только если положительный остаток ровно в одном месте.
 ' Возвращает "" если мест 0 или >1 (multiple_locations => оставить пустым и показать подсказку).
-' Выдачи всегда общий склад (SC_GENERAL) - контур не выбирается пользователем на этом листе.
+' single_physical_warehouse (FINAL): раньше здесь был жёстко зашит SC_GENERAL - "Выдачи"
+' работали только с позициями, пришедшими через "Заказы", и не находили остаток по EI,
+' пришедшему через "Приход — Офис/Производство/Детали" (сам EI существовал, но автоподстановка
+' молчала "остатка нет"). Один физический склад - без фильтра по источнику вообще.
 Public Function PRIME_SingleLocationWithStock(ByVal productCode As String) As String
     Dim locations() As String
     Dim quantities() As Double
     Dim contours() As String
-    PRIME_StockByLocation(productCode, SC_GENERAL, locations, quantities, contours)
+    PRIME_StockByLocation(productCode, "", locations, quantities, contours)
 
     Dim result As String
     result = ""
@@ -297,12 +300,16 @@ Public Function PRIME_SingleLocationWithStock(ByVal productCode As String) As St
     End If
 End Function
 
-' Остаток товара по (месту хранения, контуру), посчитанный из COMMITTED-движений
-' (DB_PRIME_MOVEMENTS). Заполняет параллельные массивы locations()/quantities()/contours() -
-' Collection в StarBasic не отдаёт свои ключи обратно, поэтому агрегация ведётся через явные
-' массивы, а не через Collection. contourFilter="" - без фильтра по контуру (агрегирует по
-' месту независимо от контура; для "Наличие"/диагностики), непустое значение - строго один
-' контур (R02, используется большинством вызывающих - Инвентаризация, Выдачи).
+' Остаток товара по месту хранения, посчитанный из COMMITTED-движений (DB_PRIME_MOVEMENTS).
+' Заполняет параллельные массивы locations()/quantities()/contours() - Collection в StarBasic не
+' отдаёт свои ключи обратно, поэтому агрегация ведётся через явные массивы, а не через Collection.
+' FINAL mega-task (single_physical_warehouse): группировка была по (место, контур) - тот же класс
+' бага, что и в PRIME_09_StockSearch.PRIME_Stock_Rebuild (см. подробное объяснение там) - две
+' строки с одним и тем же местом, но разным STOCK_CONTOUR (например, обычное поступление и
+' перемещение с пустым контуром), задваивались в остатке по месту вместо суммирования в одну
+' позицию. Теперь группировка строго по месту; contourFilter оставлен в сигнатуре ради
+' совместимости вызывающих (оба текущих вызова передают "") - contours() на выходе несёт только
+' последний увиденный тег как информационный, не влияет на суммирование.
 ' committed_only_stock (2.0.1): фильтр по PRIME_IsOpIdCommitted - см. комментарий у
 ' PRIME_04_Posting.PRIME_LotBalance, здесь та же независимая реализация суммирования по
 ' движениям, поэтому фильтр нужно было продублировать отдельно.
@@ -348,11 +355,9 @@ Public Sub PRIME_StockByLocation(ByVal productCode As String, ByVal contourFilte
             If contourFilter <> "" And rowContour <> contourFilter Then GoTo ContinueLoop
             Dim loc As String
             loc = CStr(table(i)(colLoc))
-            Dim k As String
-            k = loc & "|" & rowContour
             foundIdx = -1
             For j = 0 To locCount - 1
-                If locations(j) & "|" & contours(j) = k Then
+                If locations(j) = loc Then
                     foundIdx = j
                     Exit For
                 End If
@@ -364,6 +369,7 @@ Public Sub PRIME_StockByLocation(ByVal productCode As String, ByVal contourFilte
                 locCount = locCount + 1
             Else
                 quantities(foundIdx) = quantities(foundIdx) + CDbl(table(i)(colQty))
+                If rowContour <> "" Then contours(foundIdx) = rowContour
             End If
         End If
 ContinueLoop:

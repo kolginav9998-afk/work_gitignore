@@ -75,7 +75,6 @@ Private Sub PRIME_Transfers_AutofillByCode(ByVal oSheet As Object, ByVal headers
 
     PRIME_SetCellIfEmpty(oSheet, headers, row, "Наименование", PRIME_GetProductField(code, "PRODUCT_NAME"))
     PRIME_SetCellIfEmpty(oSheet, headers, row, "Ед. изм.", PRIME_GetProductField(code, "BASE_UNIT"))
-    PRIME_SetCellIfEmpty(oSheet, headers, row, "Контур — откуда", "Склад")
     PRIME_SetCellIfEmpty(oSheet, headers, row, "Место — откуда", PRIME_GetProductField(code, "DEFAULT_LOCATION"))
 End Sub
 
@@ -224,8 +223,11 @@ Private Function PRIME_Transfers_BuildLine(ByVal oSheet As Object, ByVal headers
     docLine.UnitInput = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Ед. изм."), row).getString()
     docLine.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место — откуда"), row).getString()
     docLine.LocationTo = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место — куда"), row).getString()
-    docLine.ContourFrom = PRIME_ContourFromDisplayName(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Контур — откуда"), row).getString())
-    docLine.ContourTo = PRIME_ContourFromDisplayName(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Контур — куда"), row).getString())
+    ' transfers.rule (FINAL): перемещение не меняет источник происхождения EI - контур больше не
+    ' спрашивается у пользователя (см. PRIME_00_Config.PRIME_TransfersColumns), ContourFrom/
+    ' ContourTo остаются "" - PRIME_04_Posting.PRIME_ValidateTransfer/PRIME_PostTransferLines
+    ' больше не используют их для физического разделения остатка (single_physical_warehouse),
+    ' а ORIGIN/STOCK_CONTOUR новой партии наследуются от исходной.
     docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Комментарий"), row).getString()
     PRIME_Transfers_BuildLine = True
 End Function

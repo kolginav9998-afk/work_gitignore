@@ -236,6 +236,8 @@ Public Sub PRIME_Install_EnsureAllBusinessSheetsOnly()
     PRIME_Install_EnsureBusinessSheet(SH_ISSUE_OFFICE, PRIME_WorkflowIssueColumns(SH_ISSUE_OFFICE), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_PRODUCTION, PRIME_WorkflowReceiptColumns(SH_RECEIPT_PRODUCTION), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RECEIPT_DETAILS, PRIME_WorkflowReceiptColumns(SH_RECEIPT_DETAILS), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_PRODUCTION, PRIME_WorkflowIssueColumns(SH_ISSUE_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Install_EnsureBusinessSheet(SH_ISSUE_DETAILS, PRIME_WorkflowIssueColumns(SH_ISSUE_DETAILS), PRIME_WorkflowHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_RETURNS, PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
     PRIME_Install_EnsureBusinessSheet(SH_INVENTORY, PRIME_InventoryColumns(), Array())
     PRIME_Install_EnsureBusinessSheet(SH_KITS, PRIME_KitsColumns(), Array())
@@ -279,21 +281,16 @@ Public Sub PRIME_Migration_RenameSearchToPoisk()
     PRIME_InvalidateHeaderCache(SH_SEARCH)
 End Sub
 
-' R27 (2.1.0): легаси-формы 1.4.1 "Приход/Расход — Производство/Детали" убираются из
-' пользовательского UI (не удаляются - остаются как архивная история, ARCHITECTURE §5) -
-' скрываем лист, не стираем данные, в отличие от полного удаления легаси Basic-модулей
-' (см. tools/build_ods.py.remove_legacy_modules, это другой, уже решённый вопрос).
+' R27 (2.1.0), FINAL (mega-prompt): изначально скрывала легаси-формы 1.4.1
+' "Приход/Расход — Производство/Детали" как read-only архив. Все 4 листа этой группы теперь
+' активные receipt/issue-workflow листы (см. SH_RECEIPT_PRODUCTION/SH_RECEIPT_DETAILS/
+' SH_ISSUE_PRODUCTION/SH_ISSUE_DETAILS в PRIME_00_Config) - легаси-архива этой группы больше
+' не осталось. Единственный оставшийся необновлённый лист старой формы - "Приход/Расход — Цех"
+' (SH_RECEIPT_SHOP/SH_ISSUE_SHOP) - он просто отсутствует в allow-list
+' PRIME_12_UI.PRIME_UI_VisibleSheetNames и скрывается этим механизмом, без отдельной функции.
 Public Sub PRIME_Migration_HideLegacyFormSheets()
-    ' 2.1.2: "Приход — Производство/Детали" ушли из этого списка - они больше не архив, а
-    ' активные receipt-листы (см. SH_RECEIPT_PRODUCTION/SH_RECEIPT_DETAILS в PRIME_00_Config).
-    Dim legacySheets As Variant
-    legacySheets = Array(SH_LEGACY_ISSUE_PROD, SH_LEGACY_ISSUE_PARTS)
-    Dim i As Long
-    For i = LBound(legacySheets) To UBound(legacySheets)
-        If PRIME_SheetExists(legacySheets(i)) Then
-            PRIME_GetSheet(legacySheets(i)).IsVisible = False
-        End If
-    Next i
+    ' Ничего не делает - см. комментарий выше. Оставлена как единая точка вызова в
+    ' PRIME_Install_EnsureAllBusinessSheetsOnly на случай будущей архивной группы.
 End Sub
 
 Private Function PRIME_ArrayConcat(ByVal a As Variant, ByVal b As Variant) As Variant
@@ -343,7 +340,7 @@ End Function
 Public Sub PRIME_Install_DisableLegacyEvents()
     Dim sheetNames As Variant
     sheetNames = Array(SH_ORDERS, SH_ISSUES, SH_RECEIPT_SHOP, SH_ISSUE_SHOP, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, _
-        SH_RETURNS, "Приход — Производство", "Расход — Производство", "Приход — Детали", "Расход — Детали")
+        SH_RETURNS, SH_RECEIPT_PRODUCTION, SH_ISSUE_PRODUCTION, SH_RECEIPT_DETAILS, SH_ISSUE_DETAILS)
     Dim i As Long
     For i = LBound(sheetNames) To UBound(sheetNames)
         If PRIME_SheetExists(sheetNames(i)) Then
@@ -496,6 +493,8 @@ Public Sub PRIME_Migration_MigrateAllBusinessSheets()
     PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_OFFICE, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_OFFICE), PRIME_WorkflowHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_PRODUCTION, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_PRODUCTION), PRIME_WorkflowHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_RECEIPT_DETAILS, PRIME_ArrayConcat(PRIME_WorkflowReceiptColumns(SH_RECEIPT_DETAILS), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_PRODUCTION, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_PRODUCTION), PRIME_WorkflowHiddenColumns())
+    PRIME_Migration_MigrateBusinessSheetColumns SH_ISSUE_DETAILS, PRIME_ArrayConcat(PRIME_WorkflowIssueColumns(SH_ISSUE_DETAILS), PRIME_WorkflowHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_RETURNS, PRIME_ArrayConcat(PRIME_ReturnsColumns(), PRIME_ReturnsHiddenColumns())
     PRIME_Migration_MigrateBusinessSheetColumns SH_INVENTORY, PRIME_InventoryColumns()
     PRIME_Migration_MigrateBusinessSheetColumns SH_STOCK, PRIME_StockColumns()
@@ -545,6 +544,8 @@ Public Sub PRIME_Build_MigrateSilent()
         PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_PRODUCTION, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_DETAILS, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_DETAILS, "Внутренний код", oldCodes, newCodes)
     End If
     PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)
     PRIME_MetaSet("MIGRATED_AT", Format(Now, "YYYY-MM-DD HH:MM:SS"))
@@ -583,6 +584,8 @@ Public Sub PRIME_Migration_RunButton()
         PRIME_Migration_RemapCodes(SH_ISSUE_OFFICE, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_PRODUCTION, "Внутренний код", oldCodes, newCodes)
         PRIME_Migration_RemapCodes(SH_RECEIPT_DETAILS, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_PRODUCTION, "Внутренний код", oldCodes, newCodes)
+        PRIME_Migration_RemapCodes(SH_ISSUE_DETAILS, "Внутренний код", oldCodes, newCodes)
     End If
 
     PRIME_MetaSet("SCHEMA_VERSION", PRIME_SCHEMA_VERSION)

@@ -36,11 +36,12 @@ End Type
 
 
 ' PRIME_07_Workflows
-' Единый механизм для активных receipt/issue-листов (Приход/Расход - Цех/Офис, +Приход -
-' Производство/Детали с 2.1.2) - один и тот же posting engine, одна и та же лёгкая логика
-' событий. "Расход — Производство/Детали" сюда НЕ входят: активного двойника не получают (нет
-' в авторитетном списке видимых листов master task 2.1.2), остаются архивом истории
-' (ARCHITECTURE §5, legacy_parallel_forms).
+' Единый механизм для активных receipt/issue-листов (Приход/Расход — Офис/Производство/Детали,
+' плюс легаси "Приход/Расход — Цех" - скрыт из UI, но engine не тронут ради сохранности старых
+' данных) - один и тот же posting engine, одна и та же лёгкая логика событий.
+' single_physical_warehouse (FINAL): Офис/Производство/Детали/Заказы - МЕТКА источника/
+' назначения движения, а не отдельный физический остаток - один склад, один общий остаток по
+' (EI_CODE, место хранения), см. PRIME_04_Posting.PRIME_LocationContourBalance.
 
 Private Function PRIME_Workflow_IsReceiptSheet(ByVal sheetName As String) As Boolean
     PRIME_Workflow_IsReceiptSheet = (sheetName = SH_RECEIPT_SHOP Or sheetName = SH_RECEIPT_OFFICE _
@@ -48,7 +49,8 @@ Private Function PRIME_Workflow_IsReceiptSheet(ByVal sheetName As String) As Boo
 End Function
 
 Private Function PRIME_Workflow_IsIssueSheet(ByVal sheetName As String) As Boolean
-    PRIME_Workflow_IsIssueSheet = (sheetName = SH_ISSUE_SHOP Or sheetName = SH_ISSUE_OFFICE)
+    PRIME_Workflow_IsIssueSheet = (sheetName = SH_ISSUE_SHOP Or sheetName = SH_ISSUE_OFFICE _
+        Or sheetName = SH_ISSUE_PRODUCTION Or sheetName = SH_ISSUE_DETAILS)
 End Function
 
 ' Единственный обработчик события для всех 4 листов - LO передаёт индекс листа в oRangeAddr.Sheet,
@@ -74,7 +76,7 @@ Public Sub PRIME_OnContentChanged_Workflow(ByVal oRangeAddr As Variant)
     If colCode < 0 Then GoTo CleanExit
 
     Dim colQty As Long
-    colQty = PRIME_ColIndex(headers, "Кол-во")
+    colQty = PRIME_ColIndex(headers, PRIME_Workflow_QtyColName(sheetName))
 
     Dim firstDataRow As Long
     firstDataRow = PRIME_FormSchemaFirstDataRow(sheetName)
@@ -83,7 +85,7 @@ Public Sub PRIME_OnContentChanged_Workflow(ByVal oRangeAddr As Variant)
         If r >= firstDataRow Then
             For c = oRangeAddr.StartColumn To oRangeAddr.EndColumn
                 If c = colCode Then
-                    PRIME_Workflow_AutofillByCode(oSheet, headers, r)
+                    PRIME_Workflow_AutofillByCode(oSheet, headers, sheetName, r)
                     PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, r)
                 ElseIf c = colQty Then
                     PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, r)
@@ -96,7 +98,26 @@ CleanExit:
     PRIME_EventLeave()
 End Sub
 
-Private Sub PRIME_Workflow_AutofillByCode(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long)
+' Имя колонки "Кол-во"/"Место хранения" зависит от receipt/issue (см. новые unified-схемы в
+' PRIME_00_Config.PRIME_WorkflowReceiptColumns/PRIME_WorkflowIssueColumns) - единая точка,
+' чтобы не рассинхронизировать несколько мест, где нужно это имя.
+Public Function PRIME_Workflow_QtyColName(ByVal sheetName As String) As String
+    If PRIME_Workflow_IsReceiptSheet(sheetName) Then
+        PRIME_Workflow_QtyColName = "Количество прихода"
+    Else
+        PRIME_Workflow_QtyColName = "Количество"
+    End If
+End Function
+
+Public Function PRIME_Workflow_LocColName(ByVal sheetName As String) As String
+    If PRIME_Workflow_IsReceiptSheet(sheetName) Then
+        PRIME_Workflow_LocColName = "Место хранения на складе"
+    Else
+        PRIME_Workflow_LocColName = "Место хранения"
+    End If
+End Function
+
+Private Sub PRIME_Workflow_AutofillByCode(ByVal oSheet As Object, ByVal headers As Variant, ByVal sheetName As String, ByVal row As Long)
     Dim colCode As Long
     colCode = PRIME_ColIndex(headers, "Внутренний код")
     Dim code As String
@@ -107,28 +128,24 @@ Private Sub PRIME_Workflow_AutofillByCode(ByVal oSheet As Object, ByVal headers 
     PRIME_SetCellIfEmpty(oSheet, headers, row, "Ед. изм.", PRIME_GetProductField(code, "BASE_UNIT"))
     PRIME_SetCellIfEmpty(oSheet, headers, row, "Категория", PRIME_GetProductField(code, "CATEGORY"))
     PRIME_SetCellIfEmpty(oSheet, headers, row, "Подкатегория", PRIME_GetProductField(code, "SUBCATEGORY"))
-    PRIME_SetCellIfEmpty(oSheet, headers, row, "Место хранения", PRIME_GetProductField(code, "DEFAULT_LOCATION"))
+    PRIME_SetCellIfEmpty(oSheet, headers, row, PRIME_Workflow_LocColName(sheetName), PRIME_GetProductField(code, "DEFAULT_LOCATION"))
 End Sub
 
-' R19/R20/R21 (2.1.0): "Остаток .../Приход или Расход/Будет ..." - контур берётся из имени листа
-' (PRIME_ContourForSheet: Цех -> WORKSHOP_DETAILS, Офис -> OFFICE), место - из ячейки строки.
-' Приход увеличивает "Будет", расход уменьшает - то же представление COMMITTED-ledger, что и
-' лист "Наличие", просто с готовым фильтром по контуру этого листа.
+' single_physical_warehouse (FINAL): раньше здесь были парные "Остаток .../Будет ..."-колонки,
+' партиционированные по контуру листа (Остаток офиса/Будет в офисе и т.п. - forbidden_ui_terms
+' в новом задании) - "Будет" вычислялась арифметикой (before +/- введённое количество) и после
+' проведения, когда код позиции дописывается обратно в ячейку, событие срабатывало ПОВТОРНО и
+' прибавляло/вычитало количество ЕЩЁ РАЗ поверх уже проведённого остатка (double-count bug).
+' Заменено на единственную колонку "Остаток позиции на складе" - просто ТЕКУЩИЙ остаток именно
+' этого EI_CODE (без учёта контура/источника - один физический склад), без какой-либо
+' арифметики here - остаток всегда пересчитывается заново из COMMITTED-ledger, поэтому
+' повторный вызов события идемпотентен.
 Private Sub PRIME_Workflow_RefreshInlineStock(ByVal oSheet As Object, ByVal sheetName As String, ByVal headers As Variant, ByVal row As Long)
-    Dim colBefore As Long, colAfter As Long, colCode As Long, colLoc As Long, colQty As Long
+    Dim colBalance As Long, colCode As Long, colLoc As Long
     colCode = PRIME_ColIndex(headers, "Внутренний код")
-    colLoc = PRIME_ColIndex(headers, "Место хранения")
-    colQty = PRIME_ColIndex(headers, "Кол-во")
-    Dim isReceipt As Boolean
-    isReceipt = PRIME_Workflow_IsReceiptSheet(sheetName)
-    If sheetName = SH_RECEIPT_OFFICE Or sheetName = SH_ISSUE_OFFICE Then
-        colBefore = PRIME_ColIndex(headers, "Остаток офиса") : colAfter = PRIME_ColIndex(headers, "Будет в офисе")
-    ElseIf sheetName = SH_RECEIPT_PRODUCTION Then
-        colBefore = PRIME_ColIndex(headers, "Остаток производства") : colAfter = PRIME_ColIndex(headers, "Будет в производстве")
-    Else
-        colBefore = PRIME_ColIndex(headers, "Остаток деталей") : colAfter = PRIME_ColIndex(headers, "Будет деталей")
-    End If
-    If colBefore < 0 And colAfter < 0 Then Exit Sub
+    colLoc = PRIME_ColIndex(headers, PRIME_Workflow_LocColName(sheetName))
+    colBalance = PRIME_ColIndex(headers, "Остаток позиции на складе")
+    If colBalance < 0 Then Exit Sub
 
     Dim code As String
     code = Trim(oSheet.getCellByPosition(colCode, row).getString())
@@ -137,22 +154,7 @@ Private Sub PRIME_Workflow_RefreshInlineStock(ByVal oSheet As Object, ByVal shee
     Dim loc As String
     loc = ""
     If colLoc >= 0 Then loc = Trim(oSheet.getCellByPosition(colLoc, row).getString())
-    Dim contour As String
-    contour = PRIME_ContourForSheet(sheetName)
-    Dim before As Double
-    before = PRIME_LocationContourBalance(code, loc, contour)
-    If colBefore >= 0 Then oSheet.getCellByPosition(colBefore, row).setValue(before)
-
-    If colAfter >= 0 Then
-        Dim qtyStr As String
-        qtyStr = Trim(oSheet.getCellByPosition(colQty, row).getString())
-        If qtyStr <> "" And IsNumeric(qtyStr) Then
-            Dim delta As Double
-            delta = CDbl(qtyStr)
-            If Not isReceipt Then delta = -delta
-            oSheet.getCellByPosition(colAfter, row).setValue(before + delta)
-        End If
-    End If
+    oSheet.getCellByPosition(colBalance, row).setValue(PRIME_LocationContourBalance(code, loc, ""))
 End Sub
 
 ' === Кнопки (одни и те же имена процедур используются на всех 4 листах; активный лист
@@ -243,12 +245,24 @@ Public Sub PRIME_Workflow_ConductAllButton()
             oSheet.getCellByPosition(colCode, rowForLine(i)).setString(plan.Lines(i).ProductCode)
         End If
         PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, rowForLine(i))
+        PRIME_Workflow_MarkPostedRow(oSheet, headers, rowForLine(i), docId)
         If colState >= 0 Then
             oSheet.getCellByPosition(colState, rowForLine(i)).setString("DONE:" & _
                 oSheet.getCellByPosition(colState, rowForLine(i)).getString())
         End If
     Next i
     MsgBox "Проведено строк: " & plan.LineCount & " (документ " & docId & ")"
+End Sub
+
+' receipt_registers (FINAL): "После проведения строка НЕ исчезает: в ней видны EI, количество
+' прихода и текущий остаток этой позиции" + видимые DOC_ID/Статус - без MsgBox с номером
+' документа как единственного способа его узнать. No-op на листах без этих колонок (Расход).
+Private Sub PRIME_Workflow_MarkPostedRow(ByVal oSheet As Object, ByVal headers As Variant, ByVal row As Long, ByVal docId As String)
+    Dim colDocId As Long, colStatus As Long
+    colDocId = PRIME_ColIndex(headers, "DOC_ID")
+    colStatus = PRIME_ColIndex(headers, "Статус")
+    If colDocId >= 0 Then oSheet.getCellByPosition(colDocId, row).setString(docId)
+    If colStatus >= 0 Then oSheet.getCellByPosition(colStatus, row).setString("Проведено")
 End Sub
 
 Public Sub PRIME_Workflow_ConductRow(ByVal oSheet As Object, ByVal row As Long)
@@ -276,6 +290,7 @@ Public Sub PRIME_Workflow_ConductRow(ByVal oSheet As Object, ByVal row As Long)
         oSheet.getCellByPosition(PRIME_ColIndex(headers, "Внутренний код"), row).setString(plan.Lines(0).ProductCode)
     End If
     PRIME_Workflow_RefreshInlineStock(oSheet, sheetName, headers, row)
+    PRIME_Workflow_MarkPostedRow(oSheet, headers, row, docId)
     Dim colState As Long
     colState = PRIME_ColIndex(headers, "_PRIME_WFState")
     If colState >= 0 Then
@@ -329,10 +344,12 @@ Private Function PRIME_Workflow_BuildLine(ByVal oSheet As Object, ByVal sheetNam
         Exit Function
     End If
 
+    Dim qtyColName As String
+    qtyColName = PRIME_Workflow_QtyColName(sheetName)
     Dim qtyStr As String
-    qtyStr = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кол-во"), row).getString())
+    qtyStr = Trim(oSheet.getCellByPosition(PRIME_ColIndex(headers, qtyColName), row).getString())
     If qtyStr = "" Or Not IsNumeric(qtyStr) Or CDbl(qtyStr) <= 0 Then
-        MsgBox "Строка " & (row + 1) & ": заполните корректное ""Кол-во""."
+        MsgBox "Строка " & (row + 1) & ": заполните корректное """ & qtyColName & """."
         PRIME_Workflow_BuildLine = False
         Exit Function
     End If
@@ -345,14 +362,16 @@ Private Function PRIME_Workflow_BuildLine(ByVal oSheet As Object, ByVal sheetNam
     docLine.Comment = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Документ"), row).getString() & _
         " " & oSheet.getCellByPosition(PRIME_ColIndex(headers, "Комментарий"), row).getString()
 
+    Dim locColName As String
+    locColName = PRIME_Workflow_LocColName(sheetName)
     If isReceipt Then
-        docLine.LocationTo = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место хранения"), row).getString()
+        docLine.LocationTo = oSheet.getCellByPosition(PRIME_ColIndex(headers, locColName), row).getString()
         docLine.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кто сдал"), row).getString()
     Else
-        docLine.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Место хранения"), row).getString()
-        docLine.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кому"), row).getString()
+        docLine.LocationFrom = oSheet.getCellByPosition(PRIME_ColIndex(headers, locColName), row).getString()
+        docLine.Recipient = oSheet.getCellByPosition(PRIME_ColIndex(headers, "Кто принял"), row).getString()
         Dim colDest As Long
-        colDest = PRIME_ColIndex(headers, "Назначение / проект")
+        colDest = PRIME_ColIndex(headers, "Куда / назначение")
         If colDest >= 0 Then docLine.DestinationProject = oSheet.getCellByPosition(colDest, row).getString()
     End If
     PRIME_Workflow_BuildLine = True
@@ -371,13 +390,13 @@ Public Sub PRIME_Workflow_FillArticleButton()
     processed = 0
     Dim r As Long
     For r = firstDataRow To lastRow
-        PRIME_Workflow_AutofillByCode(oSheet, headers, r)
+        PRIME_Workflow_AutofillByCode(oSheet, headers, oSheet.Name, r)
         processed = processed + 1
     Next r
     MsgBox "Автозаполнение выполнено для " & processed & " строк."
 End Sub
 
-' "Повторить значения" - копирует общие поля (Место хранения/Кто сдал/Кому/Документ) из
+' "Повторить значения" - копирует общие поля (Место хранения/Кто сдал/Кто принял/Документ) из
 ' предыдущей строки в новую, ускоряя ручной ввод серии однотипных операций.
 Public Sub PRIME_Workflow_RepeatFieldsButton()
     Dim oSheet As Object
@@ -391,7 +410,7 @@ Public Sub PRIME_Workflow_RepeatFieldsButton()
     If row < PRIME_FormSchemaFirstDataRow(oSheet.Name) + 1 Then Exit Sub ' нужна предыдущая строка данных
 
     Dim repeatCols As Variant
-    repeatCols = Array("Место хранения", "Кто сдал", "Кому", "Документ")
+    repeatCols = Array(PRIME_Workflow_LocColName(oSheet.Name), "Кто сдал", "Кто принял", "Документ")
     Dim i As Long
     For i = LBound(repeatCols) To UBound(repeatCols)
         Dim col As Long

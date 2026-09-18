@@ -49,22 +49,74 @@ Public Sub PRIME_Stock_ShowByLocationButton()
     PRIME_Stock_Rebuild("LOCATION", Trim(value))
 End Sub
 
-' 2.1.0 (R24): быстрые фильтры сводного листа "Наличие" по контуру - Склад/Детали цеха/Офис.
-Public Sub PRIME_Stock_ShowContourGeneralButton()
-    PRIME_Stock_Rebuild("CONTOUR", SC_GENERAL)
+' FINAL mega-task (single_physical_warehouse): контур - неотъемлемая метка происхождения, а не
+' физический раздел склада, поэтому быстрые фильтры "Наличие" переведены с контура на
+' происхождение EI (LOT.ORIGIN = лист, создавший позицию: "Заказы"/"Приход — Офис"/
+' "Приход — Производство"/"Приход — Детали") - см. PRIME_Stock_Rebuild ниже, filterMode="ORIGIN".
+' critical_fix (confirmed bug #3): раньше "Из производства" вызывал ShowContourGeneralButton
+' (SC_GENERAL) - показывал общий контур вместо реального производства.
+Public Sub PRIME_Stock_ShowOriginOrdersButton()
+    PRIME_Stock_Rebuild("ORIGIN", SH_ORDERS)
 End Sub
 
-Public Sub PRIME_Stock_ShowContourWorkshopButton()
-    PRIME_Stock_Rebuild("CONTOUR", SC_WORKSHOP_DETAILS)
+Public Sub PRIME_Stock_ShowOriginOfficeButton()
+    PRIME_Stock_Rebuild("ORIGIN", SH_RECEIPT_OFFICE)
 End Sub
 
-Public Sub PRIME_Stock_ShowContourOfficeButton()
-    PRIME_Stock_Rebuild("CONTOUR", SC_OFFICE)
+Public Sub PRIME_Stock_ShowOriginProductionButton()
+    PRIME_Stock_Rebuild("ORIGIN", SH_RECEIPT_PRODUCTION)
 End Sub
 
-' R24: "Наличие" - сводный обзор по (товар, контур, место), не обязательный ежедневный экран
-' (актуальный остаток дублируется inline на рабочих листах - см. PRIME_05_Orders/06_Issues/
-' 07_Workflows). Источник - те же COMMITTED-движения, что и весь остальной остаток/FIFO.
+Public Sub PRIME_Stock_ShowOriginDetailsButton()
+    PRIME_Stock_Rebuild("ORIGIN", SH_RECEIPT_DETAILS)
+End Sub
+
+' Для партии, полученной перемещением/инвентаризацией (ORIGIN партии в DB_PRIME_LOTS хранит
+' исходный лист прихода - см. PRIME_04_Posting.PRIME_PostTransferLines/PostAdjustmentLines),
+' поднимаемся по цепочке PARENT_LOT_ID до первой партии без родителя - это и есть настоящее
+' происхождение EI (заказ/офис/производство/детали), которое transfers.rule запрещает менять.
+' lotTable/lotHeaders читаются один раз вызывающей стороной (PRIME_Stock_Rebuild) - здесь только
+' поиск по уже загруженной в память таблице, без повторных обращений к листу на партию.
+Private Sub PRIME_Stock_ResolveLotRoot(ByVal lotTable As Variant, ByVal lotHeaders As Variant, ByVal startLotId As String, _
+        ByRef outOrigin As String, ByRef outDocId As String, ByRef outDate As String)
+    outOrigin = "" : outDocId = "" : outDate = ""
+    If startLotId = "" Then Exit Sub
+
+    Dim colLotId As Long, colOrigin As Long, colRecDoc As Long, colRecDate As Long, colParent As Long
+    colLotId = PRIME_ColIndex(lotHeaders, "LOT_ID")
+    colOrigin = PRIME_ColIndex(lotHeaders, "ORIGIN")
+    colRecDoc = PRIME_ColIndex(lotHeaders, "RECEIPT_DOC_ID")
+    colRecDate = PRIME_ColIndex(lotHeaders, "RECEIPT_DATE")
+    colParent = PRIME_ColIndex(lotHeaders, "PARENT_LOT_ID")
+
+    Dim cur As String
+    cur = startLotId
+    Dim guard As Long
+    guard = 0
+    Do While cur <> "" And guard < 1000
+        Dim idx As Long
+        idx = PRIME_FindRowByKey(lotTable, colLotId, cur)
+        If idx < 0 Then Exit Do
+        outOrigin = CStr(lotTable(idx)(colOrigin))
+        outDocId = CStr(lotTable(idx)(colRecDoc))
+        outDate = CStr(lotTable(idx)(colRecDate))
+        Dim parent As String
+        parent = ""
+        If colParent >= 0 Then parent = CStr(lotTable(idx)(colParent))
+        If parent = "" Then Exit Do
+        cur = parent
+        guard = guard + 1
+    Loop
+End Sub
+
+' R24/FINAL: "Наличие" - сводный обзор по (EI_CODE=PRODUCT_CODE, место), одна строка на реальную
+' позицию, БЕЗ агрегации одноимённых/разных EI (one_physical_stock, primary_grain=EI_CODE) - не
+' обязательный ежедневный экран (актуальный остаток дублируется inline на рабочих листах - см.
+' PRIME_05_Orders/06_Issues/07_Workflows). Источник - те же COMMITTED-движения, что и весь
+' остальной остаток/FIFO. "Тип/источник"/"Дата прихода"/"Исходный DOC_ID" берутся из корневой
+' партии (PRIME_Stock_ResolveLotRoot), а не из отдельных движений - иначе после разрешённого
+' cross-tag списания (Выдачи снимают любой валидный EI) строки того же EI расходились бы на
+' несколько неверных "источников" (см. PRIME_Stock_Rebuild диагностику в KNOWN_ISSUES).
 Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As String)
     Dim oSheet As Object
     oSheet = PRIME_GetSheet(SH_STOCK)
@@ -78,46 +130,75 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
     If Not PRIME_SheetExists(SH_DB_MOVEMENTS) Then Exit Sub
     Dim moveHeaders As Variant
     moveHeaders = PRIME_HeaderMap(SH_DB_MOVEMENTS)
-    Dim colProduct As Long, colLoc As Long, colQty As Long, colDate As Long, colOpId As Long, colContour As Long
+    Dim colProduct As Long, colLoc As Long, colQty As Long, colDate As Long, colOpId As Long, colMoveLot As Long, colMoveDoc As Long
     colProduct = PRIME_ColIndex(moveHeaders, "PRODUCT_CODE")
     colLoc = PRIME_ColIndex(moveHeaders, "LOCATION")
     colQty = PRIME_ColIndex(moveHeaders, "QTY_BASE")
     colDate = PRIME_ColIndex(moveHeaders, "MOVE_DATE")
     colOpId = PRIME_ColIndex(moveHeaders, "OP_ID")
-    colContour = PRIME_ColIndex(moveHeaders, "STOCK_CONTOUR")
+    colMoveLot = PRIME_ColIndex(moveHeaders, "LOT_ID")
+    colMoveDoc = PRIME_ColIndex(moveHeaders, "DOC_ID")
 
     Dim moveTable As Variant
     moveTable = PRIME_ReadTable(SH_DB_MOVEMENTS)
     If UBound(moveTable) < 1 Then Exit Sub
 
-    ' Агрегация product|contour|location -> (qty, lastDate), через параллельные массивы (см.
-    ' PRIME_03_Catalog для объяснения, почему не Collection с перечислением ключей).
+    Dim lotTable As Variant, lotHeaders As Variant
+    lotHeaders = PRIME_HeaderMap(SH_DB_LOTS)
+    lotTable = PRIME_ReadTable(SH_DB_LOTS)
+
+    Dim docTable As Variant, docHeaders As Variant
+    Dim colDocDocId As Long, colDocType As Long
+    Dim hasDocTable As Boolean
+    hasDocTable = PRIME_SheetExists(SH_DB_DOCUMENTS)
+    If hasDocTable Then
+        docHeaders = PRIME_HeaderMap(SH_DB_DOCUMENTS)
+        docTable = PRIME_ReadTable(SH_DB_DOCUMENTS)
+        colDocDocId = PRIME_ColIndex(docHeaders, "DOC_ID")
+        colDocType = PRIME_ColIndex(docHeaders, "DOC_TYPE")
+    End If
+
+    ' Агрегация product|location -> (qty, arrived, issued, returned, origin, rootDocId, rootDate),
+    ' через параллельные массивы (см. PRIME_03_Catalog для объяснения, почему не Collection с
+    ' перечислением ключей).
     Dim keys() As String
     Dim qtys() As Double
-    Dim lastDates() As String
+    Dim arrived() As Double
+    Dim issued() As Double
+    Dim returned() As Double
+    Dim origins() As String
+    Dim rootDocIds() As String
+    Dim rootDates() As String
     Dim n As Long
     n = 0
     ReDim keys(UBound(moveTable))
     ReDim qtys(UBound(moveTable))
-    ReDim lastDates(UBound(moveTable))
+    ReDim arrived(UBound(moveTable))
+    ReDim issued(UBound(moveTable))
+    ReDim returned(UBound(moveTable))
+    ReDim origins(UBound(moveTable))
+    ReDim rootDocIds(UBound(moveTable))
+    ReDim rootDates(UBound(moveTable))
 
     Dim i As Long, j As Long
     For i = 1 To UBound(moveTable)
-        Dim pc As String, loc As String, ctr As String
+        Dim pc As String, loc As String
         pc = CStr(moveTable(i)(colProduct))
-        ctr = ""
-        If colContour >= 0 Then ctr = CStr(moveTable(i)(colContour))
+
+        Dim lotOrigin As String, lotRootDocId As String, lotRootDate As String
+        PRIME_Stock_ResolveLotRoot lotTable, lotHeaders, CStr(moveTable(i)(colMoveLot)), lotOrigin, lotRootDocId, lotRootDate
+
         If filterMode = "CODE" And pc <> filterValue Then GoTo ContinueLoop
         If filterMode = "CATEGORY" And LCase(PRIME_GetProductField(pc, "CATEGORY")) <> LCase(filterValue) Then GoTo ContinueLoop
         If filterMode = "SUBCATEGORY" And LCase(PRIME_GetProductField(pc, "SUBCATEGORY")) <> LCase(filterValue) Then GoTo ContinueLoop
         If filterMode = "LOCATION" And LCase(CStr(moveTable(i)(colLoc))) <> LCase(filterValue) Then GoTo ContinueLoop
-        If filterMode = "CONTOUR" And ctr <> filterValue Then GoTo ContinueLoop
+        If filterMode = "ORIGIN" And lotOrigin <> filterValue Then GoTo ContinueLoop
         ' committed_only_stock (2.0.1): лист "Наличие" не должен показывать PREPARED/FAILED
         ' движения как реальный остаток - см. PRIME_04_Posting.PRIME_LotBalance.
         If Not PRIME_IsOpIdCommitted(CStr(moveTable(i)(colOpId))) Then GoTo ContinueLoop
         loc = CStr(moveTable(i)(colLoc))
         Dim k As String
-        k = pc & "|" & ctr & "|" & loc
+        k = pc & "|" & loc
         Dim foundIdx As Long
         foundIdx = -1
         For j = 0 To n - 1
@@ -126,16 +207,37 @@ Private Sub PRIME_Stock_Rebuild(ByVal filterMode As String, ByVal filterValue As
                 Exit For
             End If
         Next j
-        Dim md As String
-        md = CStr(moveTable(i)(colDate))
         If foundIdx = -1 Then
+            foundIdx = n
             keys(n) = k
-            qtys(n) = CDbl(moveTable(i)(colQty))
-            lastDates(n) = md
+            qtys(n) = 0
+            arrived(n) = 0
+            issued(n) = 0
+            returned(n) = 0
+            origins(n) = lotOrigin
+            rootDocIds(n) = lotRootDocId
+            rootDates(n) = lotRootDate
             n = n + 1
-        Else
-            qtys(foundIdx) = qtys(foundIdx) + CDbl(moveTable(i)(colQty))
-            If md > lastDates(foundIdx) Then lastDates(foundIdx) = md
+        End If
+
+        Dim qty As Double
+        qty = CDbl(moveTable(i)(colQty))
+        qtys(foundIdx) = qtys(foundIdx) + qty
+
+        Dim docType As String
+        docType = ""
+        If hasDocTable And colMoveDoc >= 0 Then
+            Dim docIdx As Long
+            docIdx = PRIME_FindRowByKey(docTable, colDocDocId, CStr(moveTable(i)(colMoveDoc)))
+            If docIdx >= 0 Then docType = CStr(docTable(docIdx)(colDocType))
+        End If
+
+        If docType = DOC_RETURN And qty > 0 Then
+            returned(foundIdx) = returned(foundIdx) + qty
+        ElseIf qty > 0 Then
+            arrived(foundIdx) = arrived(foundIdx) + qty
+        ElseIf qty < 0 Then
+            issued(foundIdx) = issued(foundIdx) - qty
         End If
 ContinueLoop:
     Next i
@@ -144,15 +246,19 @@ ContinueLoop:
     ' раньше строки накапливались в outRows()-буфер (Dim row() внутри цикла, ReDim Preserve в конце)
     ' и передавались одним PRIME_AppendRowsBatch; фикс - писать каждую строку сразу поячейково
     ' внутри цикла, без буферизации.
-    Dim colOutCode As Long, colOutName As Long, colOutContour As Long, colOutLoc As Long
-    Dim colOutUnit As Long, colOutBalance As Long, colOutLastOp As Long
-    colOutCode = PRIME_ColIndex(headers, "Код")
+    Dim colOutCode As Long, colOutName As Long, colOutOrigin As Long, colOutLoc As Long
+    Dim colOutArrived As Long, colOutIssued As Long, colOutReturned As Long, colOutBalance As Long
+    Dim colOutRecDate As Long, colOutRootDoc As Long
+    colOutCode = PRIME_ColIndex(headers, "Внутренний код")
     colOutName = PRIME_ColIndex(headers, "Наименование")
-    colOutContour = PRIME_ColIndex(headers, "Контур")
+    colOutOrigin = PRIME_ColIndex(headers, "Тип/источник")
     colOutLoc = PRIME_ColIndex(headers, "Место хранения")
-    colOutUnit = PRIME_ColIndex(headers, "Ед. изм.")
+    colOutArrived = PRIME_ColIndex(headers, "Пришло")
+    colOutIssued = PRIME_ColIndex(headers, "Выдано/списано")
+    colOutReturned = PRIME_ColIndex(headers, "Возвращено")
     colOutBalance = PRIME_ColIndex(headers, "Остаток")
-    colOutLastOp = PRIME_ColIndex(headers, "Последняя операция")
+    colOutRecDate = PRIME_ColIndex(headers, "Дата прихода")
+    colOutRootDoc = PRIME_ColIndex(headers, "Исходный DOC_ID")
 
     Dim outRow As Long
     outRow = PRIME_FormSchemaFirstDataRow(SH_STOCK)
@@ -170,11 +276,14 @@ ContinueLoop:
             parts = Split(keys(i), "|")
             oSheet.getCellByPosition(colOutCode, outRow).setString(parts(0))
             oSheet.getCellByPosition(colOutName, outRow).setString(PRIME_GetProductField(parts(0), "PRODUCT_NAME"))
-            oSheet.getCellByPosition(colOutContour, outRow).setString(PRIME_ContourDisplayName(parts(1)))
-            oSheet.getCellByPosition(colOutLoc, outRow).setString(parts(2))
-            oSheet.getCellByPosition(colOutUnit, outRow).setString(PRIME_GetProductField(parts(0), "BASE_UNIT"))
+            oSheet.getCellByPosition(colOutOrigin, outRow).setString(origins(i))
+            oSheet.getCellByPosition(colOutLoc, outRow).setString(parts(1))
+            oSheet.getCellByPosition(colOutArrived, outRow).setValue(arrived(i))
+            oSheet.getCellByPosition(colOutIssued, outRow).setValue(issued(i))
+            oSheet.getCellByPosition(colOutReturned, outRow).setValue(returned(i))
             oSheet.getCellByPosition(colOutBalance, outRow).setValue(qtys(i))
-            oSheet.getCellByPosition(colOutLastOp, outRow).setString(lastDates(i))
+            oSheet.getCellByPosition(colOutRecDate, outRow).setString(rootDates(i))
+            oSheet.getCellByPosition(colOutRootDoc, outRow).setString(rootDocIds(i))
             outRow = outRow + 1
             outN = outN + 1
         End If

@@ -113,20 +113,19 @@ Public Const SH_ISSUE_SHOP As String = "Расход — Цех"
 Public Const SH_RECEIPT_OFFICE As String = "Приход — Офис"
 Public Const SH_ISSUE_OFFICE As String = "Расход — Офис"
 
-' 2.1.2 (авторитетный список видимых листов master task): "Приход — Производство"/
-' "Приход — Детали" перестают быть архивом истории 1.4.1 и становятся ТРЕТЬИМ/ЧЕТВЁРТЫМ
-' активным receipt-workflow листом (см. PRIME_07_Workflows) - отдельная PRODUCTION-контур для
-' Производства, WORKSHOP_DETAILS (та же, что раньше была за "Приход — Цех") для Деталей. Каждая
-' строка прихода на любом из них получает свой уникальный EI_CODE, без агрегации по имени -
-' тот же engine/те же гарантии, что и у "Приход — Офис". "Расход — Производство"/
-' "Расход — Детали" активного двойника не получают (в авторитетном списке нет "Расход —
-' Производство/Детали") - остаются архивом истории (см. SH_LEGACY_ISSUE_PROD/PARTS ниже).
+' FINAL (mega-prompt): "Приход/Расход — Производство/Детали" перестают быть архивом истории
+' 1.4.1 и становятся активными receipt/issue-workflow листами (см. PRIME_07_Workflows) - отдельная
+' PRODUCTION-метка источника для Производства, WORKSHOP_DETAILS (та же, что раньше была за
+' "Приход — Цех") для Деталей. single_physical_warehouse: эта метка НЕ партиционирует физический
+' остаток (один склад) - только контекст происхождения/назначения движения. Каждая строка
+' прихода получает свой уникальный EI_CODE, без агрегации по имени - тот же engine/те же
+' гарантии, что и у "Приход/Расход — Офис". "Приход/Расход — Цех" (SH_RECEIPT_SHOP/SH_ISSUE_SHOP)
+' полностью выведены из авторитетного списка видимых листов - остаются скрытым архивом, без
+' активного двойника (заменены "...— Детали" на той же метке WORKSHOP_DETAILS).
 Public Const SH_RECEIPT_PRODUCTION As String = "Приход — Производство"
 Public Const SH_RECEIPT_DETAILS As String = "Приход — Детали"
-
-' Легаси-формы 1.4.1 - только как архив истории, не активные формы ввода (см. ARCHITECTURE §5)
-Public Const SH_LEGACY_ISSUE_PROD As String = "Расход — Производство"
-Public Const SH_LEGACY_ISSUE_PARTS As String = "Расход — Детали"
+Public Const SH_ISSUE_PRODUCTION As String = "Расход — Производство"
+Public Const SH_ISSUE_DETAILS As String = "Расход — Детали"
 
 ' --- Реестр схемы форм (header_schema_registry, PRIME 2.0.1) ---------------------------------
 ' Устраняет дефект 2.0.0: код молча предполагал, что заголовок таблицы всегда в строке 0
@@ -394,63 +393,49 @@ End Function
 
 ' Приход — Цех / Приход — Офис (единый workflow вместо разных "бухгалтерий" 1.4.1).
 ' "Внутренний код" - обязательное поле, по нему живой lookup (live_code_lookup."Приход — Цех"/"Офис").
-' 2.1.0 inline stock (R19/R21): "Остаток .../Приход/Будет ..." - подпись зависит от контура
-' листа (Цех -> "деталей", Офис -> "офиса"/"в офисе"), но логика (PRIME_07_Workflows) одна и та
-' же для обоих контуров - контур определяет только WHERE считается остаток, не КАК.
+' single_physical_warehouse (FINAL): раньше подпись "Остаток .../Будет ..." зависела от контура
+' листа (forbidden_ui_terms в новом задании: "Остаток офиса"/"Будет в офисе"/"Остаток
+' производства"/"Будет в производстве") - один физический склад, поэтому теперь единая колонка
+' "Остаток позиции на складе" для ВСЕХ receipt-листов (Офис/Производство/Детали/легаси Цех),
+' без арифметики "было+пришло" (см. PRIME_07_Workflows.PRIME_Workflow_RefreshInlineStock).
 Public Function PRIME_WorkflowReceiptColumns(ByVal sheetName As String) As Variant
-    Dim beforeLabel As String, afterLabel As String
-    If sheetName = SH_RECEIPT_OFFICE Then
-        beforeLabel = "Остаток офиса"
-        afterLabel = "Будет в офисе"
-    ElseIf sheetName = SH_RECEIPT_PRODUCTION Then
-        beforeLabel = "Остаток производства"
-        afterLabel = "Будет в производстве"
-    Else
-        beforeLabel = "Остаток деталей"
-        afterLabel = "Будет деталей"
-    End If
-    Dim cols(13) As String
+    Dim cols(14) As String
     cols(0)  = "Дата"
     cols(1)  = "Внутренний код"
     cols(2)  = "Наименование"
     cols(3)  = "Артикул"
-    cols(4)  = beforeLabel
-    cols(5)  = "Кол-во"
-    cols(6)  = afterLabel
-    cols(7)  = "Ед. изм."
+    cols(4)  = "Количество прихода"
+    cols(5)  = "Ед. изм."
+    cols(6)  = "Место хранения на складе"
+    cols(7)  = "Остаток позиции на складе"
     cols(8)  = "Кто сдал"
-    cols(9)  = "Место хранения"
-    cols(10) = "Категория"
-    cols(11) = "Подкатегория"
-    cols(12) = "Документ"
-    cols(13) = "Комментарий"
+    cols(9)  = "Категория"
+    cols(10) = "Подкатегория"
+    cols(11) = "Документ"
+    cols(12) = "Комментарий"
+    cols(13) = "DOC_ID"
+    cols(14) = "Статус"
     PRIME_WorkflowReceiptColumns = cols
 End Function
 
+' single_physical_warehouse (FINAL): та же единая логика для Расход — Офис/Производство/Детали
+' (+легаси Цех) - "Кто принял"/"Куда / назначение" вместо старых "Кому"/"Назначение / проект"
+' (preferred_ui_terms), единая колонка остатка вместо "Остаток .../Будет ...".
 Public Function PRIME_WorkflowIssueColumns(ByVal sheetName As String) As Variant
-    Dim beforeLabel As String, afterLabel As String
-    If sheetName = SH_ISSUE_OFFICE Then
-        beforeLabel = "Остаток офиса"
-        afterLabel = "Будет в офисе"
-    Else
-        beforeLabel = "Остаток деталей"
-        afterLabel = "Будет деталей"
-    End If
-    Dim cols(13) As String
+    Dim cols(12) As String
     cols(0)  = "Дата"
     cols(1)  = "Внутренний код"
     cols(2)  = "Наименование"
     cols(3)  = "Артикул"
-    cols(4)  = beforeLabel
-    cols(5)  = "Кол-во"
-    cols(6)  = afterLabel
-    cols(7)  = "Ед. изм."
-    cols(8)  = "Кому"
-    cols(9)  = "Место хранения"
+    cols(4)  = "Количество"
+    cols(5)  = "Ед. изм."
+    cols(6)  = "Место хранения"
+    cols(7)  = "Остаток позиции на складе"
+    cols(8)  = "Кто принял"
+    cols(9)  = "Куда / назначение"
     cols(10) = "Возвратный"
-    cols(11) = "Назначение / проект"
-    cols(12) = "Документ"
-    cols(13) = "Комментарий"
+    cols(11) = "Документ"
+    cols(12) = "Комментарий"
     PRIME_WorkflowIssueColumns = cols
 End Function
 
@@ -598,36 +583,45 @@ Public Function PRIME_ReturnsHiddenColumns() As Variant
     PRIME_ReturnsHiddenColumns = cols
 End Function
 
-' Лист "Наличие" (2.1.0, было "Остаток") - сводный view поверх COMMITTED-движений всех контуров,
-' batch_output, без скрытого 2000-лимита. Не обязательный ежедневный экран - остаток по каждому
-' контуру дублируется inline на рабочих листах (см. PRIME_OrdersExtraColumns/WorkflowReceipt/
-' IssueColumns/IssuesColumns), здесь - только общий обзор с фильтром по контуру.
+' Лист "Наличие" (2.1.0, было "Остаток"; FINAL mega-task: single_physical_warehouse) - сводный
+' view поверх COMMITTED-движений ОДНОГО физического склада, batch_output, без скрытого
+' 2000-лимита. primary_grain=EI_CODE (=PRODUCT_CODE) - одна строка на реальную позицию
+' (EI_CODE, место), без агрегации одноимённых/разных EI. "Тип/источник" - не физический раздел
+' склада, а метка происхождения (Заказы/Приход — Офис/Приход — Производство/Приход — Детали),
+' см. PRIME_09_StockSearch.PRIME_Stock_ResolveLotRoot. Остаток по каждой позиции также
+' дублируется inline на рабочих листах (см. PRIME_OrdersExtraColumns/WorkflowReceipt/
+' IssueColumns/IssuesColumns), здесь - только общий обзор с быстрыми фильтрами по происхождению.
 Public Function PRIME_StockColumns() As Variant
-    Dim cols(6) As String
-    cols(0) = "Код"
+    Dim cols(9) As String
+    cols(0) = "Внутренний код"
     cols(1) = "Наименование"
-    cols(2) = "Контур"
+    cols(2) = "Тип/источник"
     cols(3) = "Место хранения"
-    cols(4) = "Ед. изм."
-    cols(5) = "Остаток"
-    cols(6) = "Последняя операция"
+    cols(4) = "Пришло"
+    cols(5) = "Выдано/списано"
+    cols(6) = "Возвращено"
+    cols(7) = "Остаток"
+    cols(8) = "Дата прихода"
+    cols(9) = "Исходный DOC_ID"
     PRIME_StockColumns = cols
 End Function
 
-' Лист "Перемещения" (2.1.0, новый) - TRANSFER между контурами/местами с сохранением партийности
-' (lot lineage) - см. PRIME_15_Transfers/PRIME_04_Posting.PRIME_PostTransferLines.
+' Лист "Перемещения" (2.1.0, новый; FINAL mega-task: transfers.rule) - перемещение конкретного
+' EI МЕЖДУ МЕСТАМИ ХРАНЕНИЯ внутри одного физического склада, с сохранением партийности (lot
+' lineage) и происхождения (PRIME_04_Posting.PRIME_PostTransferLines наследует ORIGIN/
+' STOCK_CONTOUR исходной партии). "Контур — откуда/куда" убраны из пользовательского ввода -
+' transfers.rule прямо запрещает менять источник происхождения EI при перемещении, оставляя
+' только выбор места хранения.
 Public Function PRIME_TransfersColumns() As Variant
-    Dim cols(9) As String
+    Dim cols(7) As String
     cols(0) = "Дата"
     cols(1) = "Внутренний код"
     cols(2) = "Наименование"
     cols(3) = "Кол-во"
     cols(4) = "Ед. изм."
-    cols(5) = "Контур — откуда"
-    cols(6) = "Место — откуда"
-    cols(7) = "Контур — куда"
-    cols(8) = "Место — куда"
-    cols(9) = "Комментарий"
+    cols(5) = "Место — откуда"
+    cols(6) = "Место — куда"
+    cols(7) = "Комментарий"
     PRIME_TransfersColumns = cols
 End Function
 
@@ -638,7 +632,11 @@ Public Function PRIME_TransfersHiddenColumns() As Variant
 End Function
 
 ' Лист "Журнал" (2.1.0, новый) - только COMMITTED документы, read-only, по кнопке "Обновить"
-' (batch_output, не построчный пересчёт).
+' (batch_output, не построчный пересчёт). FINAL mega-task: "Контур" убран (single_physical_
+' warehouse - контур больше не физический раздел склада, а "Источник" уже несёт ту же
+' содержательную метку происхождения - см. PRIME_16_Journal.PRIME_Journal_RefreshButton) - вместо
+' него "Куда" (journal.columns: Источник/Куда) - место назначения строки документа, полезное
+' для Выдачи/Перемещений, где "Источник" один и тот же, а конечная точка отличается.
 Public Function PRIME_JournalColumns() As Variant
     Dim cols(9) As String
     cols(0) = "DOC_ID"
@@ -647,7 +645,7 @@ Public Function PRIME_JournalColumns() As Variant
     cols(3) = "Дата/время"
     cols(4) = "Статус"
     cols(5) = "Источник"
-    cols(6) = "Контур"
+    cols(6) = "Куда"
     cols(7) = "Поставщик/Получатель"
     cols(8) = "Количество строк"
     cols(9) = "Комментарий"

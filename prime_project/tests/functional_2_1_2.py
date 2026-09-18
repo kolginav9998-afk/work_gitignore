@@ -39,7 +39,8 @@ PROFILE_DIR = Path("/tmp/prime_functional_2_1_2_profile")
 OUTPUT = Path("/tmp/PRIME_functional_2_1_2.ods")
 
 VISIBLE_SHEETS = {
-    "Главная", "Заказы", "Приход — Офис", "Приход — Производство", "Приход — Детали",
+    "Главная", "Заказы", "Приход — Офис", "Расход — Офис",
+    "Приход — Производство", "Расход — Производство", "Приход — Детали", "Расход — Детали",
     "Выдачи", "Возвраты", "Перемещения", "Инвентаризация", "Наличие", "Поиск",
     "Журнал", "Комплекты",
 }
@@ -130,6 +131,7 @@ def main():
         invoke_macro(doc, "PRIME_14_MigrationInstaller.PRIME_Install_EnsureAllBusinessSheetsOnly")
         invoke_macro(doc, "PRIME_14_MigrationInstaller.PRIME_Build_MigrateSilent")
         invoke_macro(doc, "PRIME_12_UI.PRIME_UI_RestoreInterfaceSilent")
+        invoke_macro(doc, "PRIME_12_UI.PRIME_UI_FixStockPanelTextButton")
 
         # === Sheet visibility ===
         print("=== Sheet visibility ===")
@@ -137,6 +139,15 @@ def main():
                              if doc.Sheets.getByIndex(i).IsVisible}
         check(actually_visible == VISIBLE_SHEETS,
               f"visible sheets must be exactly {sorted(VISIBLE_SHEETS)}, got {sorted(actually_visible)}")
+
+        # confirmed bug #4: "Наличие" must not carry the inherited 1.4.1 Firebird decorative text.
+        print("=== Наличие panel text ===")
+        stock_sheet_early = doc.Sheets.getByName("Наличие")
+        panel_text_ok = all(
+            "Firebird" not in stock_sheet_early.getCellByPosition(0, r).getString()
+            for r in range(0, 5)
+        )
+        check(panel_text_ok, "Наличие decorative panel no longer mentions Firebird")
 
         # === Главная ===
         print("=== Главная landing sheet ===")
@@ -207,8 +218,6 @@ def main():
         transfers_sheet.getCellByPosition(t_headers.index("Кол-во"), trow).setValue(2)
         transfers_sheet.getCellByPosition(t_headers.index("Место — откуда"), trow).setString("Склад-1")
         transfers_sheet.getCellByPosition(t_headers.index("Место — куда"), trow).setString("Склад-2")
-        transfers_sheet.getCellByPosition(t_headers.index("Контур — откуда"), trow).setString("Склад")
-        transfers_sheet.getCellByPosition(t_headers.index("Контур — куда"), trow).setString("Склад")
         invoke_macro(doc, "PRIME_15_Transfers.PRIME_Transfers_ConductRow", (transfers_sheet, trow))
         tstate = transfers_sheet.getCellByPosition(t_headers.index("_PRIME_TransferState"), trow).getString()
         check(tstate.startswith("DONE:"), f"transfer committed ({tstate!r})")
@@ -246,11 +255,22 @@ def main():
         stock_headers = header_map(doc, "Наличие")
         slast = last_row(doc, stock_sheet)
         stock_row_ok = any(
-            stock_sheet.getCellByPosition(stock_headers.index("Код"), rr).getString() == code1
+            stock_sheet.getCellByPosition(stock_headers.index("Внутренний код"), rr).getString() == code1
             and stock_sheet.getCellByPosition(stock_headers.index("Наименование"), rr).getString() not in ("", "0")
             for rr in range(1, slast + 1)
         )
         check(stock_row_ok, "Наличие refresh shows a non-corrupted row for the traded EI_CODE")
+
+        # single_physical_warehouse / confirmed bug #3: "Из заказов" origin filter must show code1
+        # (minted on "Заказы") and must NOT show a PRODUCTION-origin EI - proves the quick filters
+        # now key off LOT.ORIGIN, not off the inert STOCK_CONTOUR.
+        invoke_macro(doc, "PRIME_09_StockSearch.PRIME_Stock_ShowOriginOrdersButton")
+        slast = last_row(doc, stock_sheet)
+        orders_origin_codes = {
+            stock_sheet.getCellByPosition(stock_headers.index("Внутренний код"), rr).getString()
+            for rr in range(1, slast + 1)
+        }
+        check(code1 in orders_origin_codes, "Наличие 'Из заказов' filter includes the order-origin EI_CODE")
 
         invoke_macro(doc, "PRIME_09_StockSearch.PRIME_Search_ShowAllButton")
         search_sheet = doc.Sheets.getByName("Поиск")
@@ -269,8 +289,8 @@ def main():
         prod_wf_headers = header_map(doc, "Приход — Производство")
         prow = max(last_row(doc, prod_wf_sheet) + 1, first_data_row(doc, "Приход — Производство"))
         prod_wf_sheet.getCellByPosition(prod_wf_headers.index("Наименование"), prow).setString("Деталь производства")
-        prod_wf_sheet.getCellByPosition(prod_wf_headers.index("Кол-во"), prow).setValue(5)
-        prod_wf_sheet.getCellByPosition(prod_wf_headers.index("Место хранения"), prow).setString("Цех-1")
+        prod_wf_sheet.getCellByPosition(prod_wf_headers.index("Количество прихода"), prow).setValue(5)
+        prod_wf_sheet.getCellByPosition(prod_wf_headers.index("Место хранения на складе"), prow).setString("Цех-1")
         invoke_macro(doc, "PRIME_07_Workflows.PRIME_Workflow_ConductRow", (prod_wf_sheet, prow))
         code_prod = prod_wf_sheet.getCellByPosition(prod_wf_headers.index("Внутренний код"), prow).getString()
         check(code_prod.startswith("ЕИ-") and code_prod != code1, f"Приход — Производство minted its own EI_CODE ({code_prod!r})")
@@ -279,12 +299,34 @@ def main():
         det_headers = header_map(doc, "Приход — Детали")
         drow = max(last_row(doc, det_sheet) + 1, first_data_row(doc, "Приход — Детали"))
         det_sheet.getCellByPosition(det_headers.index("Наименование"), drow).setString("Деталь")
-        det_sheet.getCellByPosition(det_headers.index("Кол-во"), drow).setValue(3)
-        det_sheet.getCellByPosition(det_headers.index("Место хранения"), drow).setString("Цех-2")
+        det_sheet.getCellByPosition(det_headers.index("Количество прихода"), drow).setValue(3)
+        det_sheet.getCellByPosition(det_headers.index("Место хранения на складе"), drow).setString("Цех-2")
         invoke_macro(doc, "PRIME_07_Workflows.PRIME_Workflow_ConductRow", (det_sheet, drow))
         code_det = det_sheet.getCellByPosition(det_headers.index("Внутренний код"), drow).getString()
         check(code_det.startswith("ЕИ-") and code_det not in (code1, code_prod),
               f"Приход — Детали minted its own EI_CODE ({code_det!r})")
+
+        # confirmed bug #3 (critical_fix): "Из производства" must filter PRODUCTION-origin EIs,
+        # not the inert GENERAL contour - see PRIME_09_StockSearch.PRIME_Stock_ShowOriginProductionButton.
+        invoke_macro(doc, "PRIME_09_StockSearch.PRIME_Stock_ShowOriginProductionButton")
+        stock_headers = header_map(doc, "Наличие")
+        plast = last_row(doc, stock_sheet)
+        production_origin_codes = {
+            stock_sheet.getCellByPosition(stock_headers.index("Внутренний код"), rr).getString()
+            for rr in range(1, plast + 1)
+        }
+        check(code_prod in production_origin_codes and code1 not in production_origin_codes
+              and code_det not in production_origin_codes,
+              f"Наличие 'Из производства' filter shows only PRODUCTION-origin EI (got {sorted(production_origin_codes)})")
+
+        invoke_macro(doc, "PRIME_09_StockSearch.PRIME_Stock_ShowOriginDetailsButton")
+        dlast = last_row(doc, stock_sheet)
+        details_origin_codes = {
+            stock_sheet.getCellByPosition(stock_headers.index("Внутренний код"), rr).getString()
+            for rr in range(1, dlast + 1)
+        }
+        check(code_det in details_origin_codes and code_prod not in details_origin_codes,
+              f"Наличие 'Детали' filter shows only DETAILS-origin EI (got {sorted(details_origin_codes)})")
 
         moves_sheet = doc.Sheets.getByName("DB_PRIME_MOVEMENTS")
         move_headers = header_map(doc, "DB_PRIME_MOVEMENTS")

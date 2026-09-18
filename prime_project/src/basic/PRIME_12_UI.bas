@@ -5,10 +5,11 @@ Option Explicit
 ' с разными списками листов). Команда "Восстановить интерфейс PRIME" НЕ вызывается во время
 ' обычного проведения (rebuild_interface_during_normal_posting=false) - только вручную.
 
-' Легаси-архивный лист ("Расход — Производство/Детали" с 2.1.2 - см. авторитетный список
-' видимых листов master task 2.1.2: у приходов на эти контуры уже есть активные листы
-' "Приход — Производство"/"Приход — Детали", у расходов активного двойника пока нет) -
-' только история, кнопки неактивны.
+' Легаси-архивный стаб, оставленный для листов 1.4.1 без активного преемника (в текущем
+' авторитетном списке видимых листов такого больше нет - "Расход — Производство/Детали" стали
+' активными issue-листами в FINAL mega-task, см. PRIME_00_Config.SH_ISSUE_PRODUCTION/
+' SH_ISSUE_DETAILS - функция сохранена как задел на случай будущего скрытого архивного листа
+' без биндинга в tools/build_ods.py.BUTTON_MAP).
 Public Sub PRIME_Legacy_ArchiveStub()
     MsgBox "Этот лист - архив истории версии 1.4.1, доступен только для чтения." & Chr(10) & _
         "Приход по этому контуру ведите на листе ""Приход — Производство"" или ""Приход — Детали""."
@@ -49,7 +50,17 @@ Public Sub PRIME_UI_RestoreInterfaceSilent()
     PRIME_UI_ApplySheetVisibility()
     PRIME_UI_ApplyFreezeAndFilters()
     PRIME_UI_FixInfoPanelText()
+    PRIME_UI_FixStockPanelText()
     PRIME_Home_RefreshButton()
+End Sub
+
+' Публичная обёртка над PRIME_UI_FixStockPanelText для builder-скрипта (tools/build_ods.py) -
+' эмпирически (см. комментарий в build_ods.py про EnsureSchema/EnsureBusinessSheet) некоторые
+' цепочки из нескольких операций внутри ОДНОГО invoke() молча не выполняют часть шагов без
+' видимого исключения; чтобы не зависеть от места этого шага внутри PRIME_UI_RestoreInterfaceSilent,
+' сборщик вызывает его дополнительно отдельным top-level invoke().
+Public Sub PRIME_UI_FixStockPanelTextButton()
+    PRIME_UI_FixStockPanelText()
 End Sub
 
 ' remove_text_references (PRIME 2.0.1): лист "Инфо" унаследован от шаблона 1.4.1 со статическим
@@ -82,14 +93,43 @@ Private Sub PRIME_UI_FixInfoPanelText()
     Next r
 End Sub
 
+' FINAL mega-task (confirmed bug #4): лист "Наличие" унаследован от шаблона 1.4.1 с декоративной
+' подписью в A2 ("Источник данных: Firebird / журнал движений. Остаток считается напрямую, без
+' формул Calc и без промежуточного VIEW.") - как и "Инфо" панель (см. PRIME_UI_FixInfoPanelText
+' выше), эта строка никогда не обновлялась ни одним PRIME-модулем и осталась неверной (PRIME не
+' использует Firebird). Ищем по подстроке "Firebird" в первых нескольких строках листа, а не по
+' фиксированному адресу ячейки - устойчивее к возможному изменению раскладки декоративной шапки.
+Private Const PRIME_STOCK_PANEL_MAX_ROW As Long = 4
+
+Private Sub PRIME_UI_FixStockPanelText()
+    If Not PRIME_SheetExists(SH_STOCK) Then Exit Sub
+    Dim oSheet As Object
+    oSheet = PRIME_GetSheet(SH_STOCK)
+
+    Dim r As Long
+    For r = 0 To PRIME_STOCK_PANEL_MAX_ROW
+        Dim text As String
+        text = oSheet.getCellByPosition(0, r).getString()
+        If InStr(text, "Firebird") > 0 Then
+            oSheet.getCellByPosition(0, r).setString( _
+                "Остаток считается напрямую из COMMITTED-движений (без формул Calc и без промежуточного VIEW).")
+        End If
+    Next r
+End Sub
+
 ' 2.1.2 (авторитетный список видимых листов, master task): переписано с "перечисли, что скрыть"
 ' на "перечисли, что показать, скрой всё остальное" - и надёжнее (не пропустит какой-нибудь
 ' унаследованный от 1.4.1 лист, о котором забыли явно написать HIDE), и буквально соответствует
 ' формулировке задания "must be hidden... unless one of the exact sheets above is the active
-' replacement". Единственные пользовательские листы, которые должны остаться видимыми:
+' replacement". FINAL mega-task: final_visible_user_sheets расширен до 16 листов - "Расход —
+' Офис/Производство/Детали" перестают быть архивом истории (см. PRIME_07_Workflows/
+' PRIME_00_Config.SH_ISSUE_PRODUCTION/SH_ISSUE_DETAILS) и становятся такими же активными
+' экранами, как остальные Приход/Расход. Единственные пользовательские листы, которые должны
+' остаться видимыми:
 Private Function PRIME_UI_VisibleSheetNames() As Variant
-    PRIME_UI_VisibleSheetNames = Array(SH_HOME, SH_ORDERS, SH_RECEIPT_OFFICE, SH_RECEIPT_PRODUCTION, _
-        SH_RECEIPT_DETAILS, SH_ISSUES, SH_RETURNS, SH_TRANSFERS, SH_INVENTORY, SH_STOCK, SH_SEARCH, _
+    PRIME_UI_VisibleSheetNames = Array(SH_HOME, SH_ORDERS, SH_RECEIPT_OFFICE, SH_ISSUE_OFFICE, _
+        SH_RECEIPT_PRODUCTION, SH_ISSUE_PRODUCTION, SH_RECEIPT_DETAILS, SH_ISSUE_DETAILS, _
+        SH_ISSUES, SH_RETURNS, SH_TRANSFERS, SH_INVENTORY, SH_STOCK, SH_SEARCH, _
         SH_JOURNAL, SH_KITS)
 End Function
 
