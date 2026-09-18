@@ -263,6 +263,67 @@ def uno_level_checks(ods_path: Path, port: int, profile_dir: Path):
             check("no working buttons reference WMSDB modules", wmsdb_bound == 0, f"{wmsdb_bound} buttons still call WMSDB*")
             check("buttons bound to PRIME macros", prime_bound > 0, f"count={prime_bound}")
 
+            # --- FINAL mega-task ui_cleanup: 0 forbidden wording / 0 duplicate-handler buttons on
+            # any authoritative visible sheet. Mirrors PRIME_12_UI.PRIME_UI_VisibleSheetNames.
+            VISIBLE_SHEETS_FOR_WORDING = [
+                "Главная", "Заказы", "Приход — Офис", "Расход — Офис",
+                "Приход — Производство", "Расход — Производство",
+                "Приход — Детали", "Расход — Детали", "Выдачи", "Возвраты",
+                "Перемещения", "Инвентаризация", "Наличие", "Поиск", "Журнал", "Комплекты",
+            ]
+            FORBIDDEN_WORDING = ["firebird", "поиск в базе", "база - поиск", "перенести в бд"]
+            forbidden_hits = []
+            for sh_name in VISIBLE_SHEETS_FOR_WORDING:
+                if not doc.Sheets.hasByName(sh_name):
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                cursor = sh.createCursor()
+                cursor.gotoEndOfUsedArea(False)
+                last_col = cursor.RangeAddress.EndColumn
+                last_row = cursor.RangeAddress.EndRow
+                for r in range(0, min(last_row, 30) + 1):
+                    for c in range(0, last_col + 1):
+                        text = sh.getCellByPosition(c, r).getString().lower()
+                        if not text:
+                            continue
+                        for term in FORBIDDEN_WORDING:
+                            if term in text:
+                                forbidden_hits.append(f"{sh_name}!R{r}C{c}: {term!r} in {text!r}")
+                forms = sh.DrawPage.Forms
+                for fi in range(forms.Count):
+                    form = forms.getByIndex(fi)
+                    for ci in range(form.Count):
+                        label = getattr(form.getByIndex(ci), "Label", "") or ""
+                        label_lower = label.lower()
+                        for term in FORBIDDEN_WORDING:
+                            if term in label_lower:
+                                forbidden_hits.append(f"{sh_name} button {form.getByIndex(ci).Name}: {term!r} in label {label!r}")
+            check("0 forbidden wording (Firebird/база) on visible sheets", len(forbidden_hits) == 0,
+                  f"found: {forbidden_hits}")
+
+            # --- 0 duplicate-handler buttons within any single visible sheet (ui_cleanup:
+            # remove_duplicate_buttons) - two buttons on the same sheet bound to the exact same
+            # PRIME macro confuse users about which one to click (e.g. the old "Новый заказ"/
+            # "Новый приход" pair, both PRIME_Orders_NewOrder).
+            duplicate_handlers = []
+            for sh_name in VISIBLE_SHEETS_FOR_WORDING:
+                if not doc.Sheets.hasByName(sh_name):
+                    continue
+                sh = doc.Sheets.getByName(sh_name)
+                forms = sh.DrawPage.Forms
+                macro_to_ctrls = {}
+                for fi in range(forms.Count):
+                    form = forms.getByIndex(fi)
+                    for ci in range(form.Count):
+                        for e in form.getScriptEvents(ci):
+                            if ".PRIME_" in e.ScriptCode or "Standard.PRIME" in e.ScriptCode:
+                                macro_to_ctrls.setdefault(e.ScriptCode, []).append(form.getByIndex(ci).Name)
+                for macro, ctrls in macro_to_ctrls.items():
+                    if len(ctrls) > 1:
+                        duplicate_handlers.append(f"{sh_name}: {ctrls} all bound to {macro}")
+            check("0 duplicate-handler buttons on any visible sheet", len(duplicate_handlers) == 0,
+                  f"found: {duplicate_handlers}")
+
             # --- post-review fix: obsolete controls (tools/build_ods.py's HIDE sentinel) must be
             # PHYSICALLY ABSENT from the built document - not merely present-but-invisible.
             # "Production ODS should contain no dead user controls": a hidden control that still
